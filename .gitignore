@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+
+# Model files
+*.pt
+*.onnx
+
+# VSCode
+.vscode/
+
+# Logs
+*.log
+
+# Node.js (React)
+node_modules/
+dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+project_tree.txt
