@@ -5,9 +5,9 @@ import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
 
-from database import SessionLocal
-from models.employee import Employee
-from models.face_embedding import FaceEmbedding
+from backend.database import SessionLocal
+from backend.models.employee import Employee
+from backend.models.face_embedding import FaceEmbedding
 
 
 # مسیر پوشه workers

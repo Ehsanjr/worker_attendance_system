@@ -1,55 +1,58 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy.orm import Session
 from typing import List
 
+from database import get_db
+from models.camera import Camera
 from schemas.camera import CameraCreate, CameraResponse
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
-fake_db = []
-id_counter = 1
-
 
 @router.post("/", response_model=CameraResponse)
-def create_camera(camera: CameraCreate):
+def create_camera(camera: CameraCreate, db: Session = Depends(get_db)):
 
-    global id_counter
+    db_camera = Camera(
+        name=camera.name,
+        rtsp_url=camera.rtsp_url,
+        location=camera.location,
+        is_active=camera.is_active
+    )
 
-    cam = {
-        "id": id_counter,
-        "name": camera.name,
-        "rtsp_url": camera.rtsp_url,
-        "location": camera.location,
-        "is_active": camera.is_active,
-        "created_at": "2026-01-01T00:00:00"
-    }
+    db.add(db_camera)
+    db.commit()
+    db.refresh(db_camera)
 
-    fake_db.append(cam)
-    id_counter += 1
-
-    return cam
+    return db_camera
 
 
 @router.get("/", response_model=List[CameraResponse])
-def list_cameras():
-    return fake_db
+def list_cameras(db: Session = Depends(get_db)):
+
+    cameras = db.query(Camera).all()
+    return cameras
 
 
 @router.get("/{camera_id}", response_model=CameraResponse)
-def get_camera(camera_id: int):
+def get_camera(camera_id: int, db: Session = Depends(get_db)):
 
-    for cam in fake_db:
-        if cam["id"] == camera_id:
-            return cam
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
 
-    raise HTTPException(status_code=404, detail="Camera not found")
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    return camera
 
 
 @router.delete("/{camera_id}")
-def delete_camera(camera_id: int):
+def delete_camera(camera_id: int, db: Session = Depends(get_db)):
 
-    for cam in fake_db:
-        if cam["id"] == camera_id:
-            fake_db.remove(cam)
-            return {"message": "camera deleted"}
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
 
-    raise HTTPException(status_code=404, detail="Camera not found")
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    db.delete(camera)
+    db.commit()
+
+    return {"message": "camera deleted"}

@@ -1,22 +1,19 @@
-import os
 import cv2
 import numpy as np
 from numpy.linalg import norm
-
 from insightface.app import FaceAnalysis
 
 
 class ArcFaceRecognizer:
-
     def __init__(
         self,
-        workers_dir="../data/workers",
+        api_client,
         device="cuda",
         similarity_threshold=0.45
     ):
-        self.workers_dir = workers_dir
+        self.api_client = api_client
         self.similarity_threshold = similarity_threshold
-        self.known_embeddings = {}
+        self.known_embeddings = {}   # { employee_id: {name, embedding} }
 
         ctx_id = 0 if device == "cuda" else -1
 
@@ -29,13 +26,15 @@ class ArcFaceRecognizer:
 
         self.load_workers()
 
+    # --------------------------------------------------
+    # Extract face + embedding
+    # --------------------------------------------------
     def get_face_and_embedding(self, image):
         if image is None or image.size == 0:
             return None, None
 
         try:
             faces = self.app.get(image)
-
             if len(faces) == 0:
                 return None, None
 
@@ -54,60 +53,65 @@ class ArcFaceRecognizer:
             return best_face, embedding
 
         except Exception as e:
-            print("embedding error:", e)
+            print("[ERROR] embedding error:", e)
             return None, None
 
+    # --------------------------------------------------
+    # Load from backend API
+    # --------------------------------------------------
     def load_workers(self):
-        if not os.path.exists(self.workers_dir):
-            print("workers folder not found:", self.workers_dir)
-            return
+        print("Loading face embeddings from API...")
 
-        for person_name in os.listdir(self.workers_dir):
-            person_path = os.path.join(self.workers_dir, person_name)
+        try:
+            workers = self.api_client.get_all_embeddings()
 
-            if not os.path.isdir(person_path):
-                continue
+            if not workers:
+                print("[WARNING] No embeddings received from API")
+                return
 
-            embeddings = []
+            self.known_embeddings.clear()
 
-            for img_name in os.listdir(person_path):
-                img_path = os.path.join(person_path, img_name)
-                img = cv2.imread(img_path)
+            for item in workers:
+                employee_id = item["employee_id"]
+                name = item["name"]
+                emb_list = item["embedding"]
 
-                if img is None:
-                    continue
+                emb = np.array(emb_list, dtype=np.float32)
+                emb /= norm(emb)
 
-                _, emb = self.get_face_and_embedding(img)
+                self.known_embeddings[employee_id] = {
+                    "name": name,
+                    "embedding": emb
+                }
 
-                if emb is not None:
-                    embeddings.append(emb)
+                print(f"Loaded: {name} (ID={employee_id})")
 
-            if len(embeddings) == 0:
-                print(f"[WARNING] no valid images for {person_name}")
-                continue
+        except Exception as e:
+            print("[ERROR] Failed to load embeddings:", e)
 
-            mean_embedding = np.mean(embeddings, axis=0)
-            mean_embedding = mean_embedding / norm(mean_embedding)
-
-            self.known_embeddings[person_name] = mean_embedding
-            print(f"{person_name} loaded ({len(embeddings)} images)")
-
+    # --------------------------------------------------
+    # Compare and return best match
+    # --------------------------------------------------
     def compare_embedding(self, embedding):
-        best_score = -1.0
-        best_person = "unknown"
+        best_score = -1
+        best_id = None
 
-        for person_name, known_embedding in self.known_embeddings.items():
-            score = float(np.dot(embedding, known_embedding))
+        for emp_id, data in self.known_embeddings.items():
+            known_emb = data["embedding"]
+            score = float(np.dot(embedding, known_emb))
 
             if score > best_score:
                 best_score = score
-                best_person = person_name
+                best_id = emp_id
 
-        if best_score < self.similarity_threshold:
-            return "unknown", round(best_score, 4)
+        if best_id is None or best_score < self.similarity_threshold:
+            return None, "unknown", float(best_score)
 
-        return best_person, round(best_score, 4)
+        return best_id, self.known_embeddings[best_id]["name"], float(best_score)
 
+    # --------------------------------------------------
+    # Full recognition
+    # --------------------------------------------------
     def recognize(self, frame, body_bbox):
         x1, y1, x2, y2 = map(int, body_bbox)
 
@@ -120,42 +124,42 @@ class ArcFaceRecognizer:
         if x2 <= x1 or y2 <= y1:
             return {
                 "name": "unknown",
-                "confidence": 0.0,
-                "face_bbox": (x1, y1, x2, y2)
+                "employee_id": None,
+                "confidence": 0,
+                "face_bbox": None
             }
 
-        person_crop = frame[y1:y2, x1:x2]
+        crop = frame[y1:y2, x1:x2]
 
-        face, embedding = self.get_face_and_embedding(person_crop)
+        face, embedding = self.get_face_and_embedding(crop)
 
+        # ❌ اگر حتی صورت هم پیدا نشد
         if face is None:
             return {
                 "name": "unknown",
-                "confidence": 0.0,
-                "face_bbox": (x1, y1, x2, y2)
+                "employee_id": None,
+                "confidence": 0,
+                "face_bbox": None
             }
 
-        fx1, fy1, fx2, fy2 = map(int, face.bbox)
-        face_bbox = (fx1 + x1, fy1 + y1, fx2 + x1, fy2 + y1)
+        # ✅ اگر صورت پیدا شد → bbox را محاسبه کن
+        fx1, fy1, fx2, fy2 = face.bbox.astype(int)
 
-        if embedding is None:
-            return {
-                "name": "unknown",
-                "confidence": 0.0,
-                "face_bbox": face_bbox
-            }
+        # تبدیل از crop space → global space
+        fx1 += x1
+        fy1 += y1
+        fx2 += x1
+        fy2 += y1
 
-        name, confidence = self.compare_embedding(embedding)
+        # حالا برو سراغ recognition
+        emp_id, name, confidence = self.compare_embedding(embedding)
 
-        if name == "unknown":
-            return {
-                "name": "unknown",
-                "confidence": 0.0,
-                "face_bbox": face_bbox
-            }
-
+        # ✅ حتی اگر unknown باشد، bbox را برگردان
         return {
-            "name": name,
+            "name": name if emp_id is not None else "unknown",
+            "employee_id": emp_id,
             "confidence": confidence,
-            "face_bbox": face_bbox
+            "face_bbox": [fx1, fy1, fx2, fy2]
         }
+
+

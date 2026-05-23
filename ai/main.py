@@ -1,32 +1,79 @@
 import cv2
 import time
+import threading
+import queue
 
 from multi_camera_manager import MultiCameraManager
 from cameras.webcam_stream import WebcamStream
 from cameras.video_file_stream import VideoFileStream
+
 from person_detector import YOLOv8PersonDetector
 from face_recognition import ArcFaceRecognizer
 from tracker import SimpleTracker
 from attendance_logic import AttendanceLogic
+from api_client import APIClient
+
+#---------------------------------
+#thread for async api post
+#---------------------------------
+def event_sender_worker(event_queue, api_client, stop_event):
+    while not stop_event.is_set() or not event_queue.empty():
+        try:
+            e = event_queue.get(timeout=0.2)
+            api_client.send_attendance_event(e)
+            event_queue.task_done()
+        except queue.Empty:
+            continue
+        except Exception as ex:
+            print(f"[API ERROR] {ex}")
 
 
 def main():
 
+    # ----------------------------------
+    # API
+    # ----------------------------------
+    api_client = APIClient("http://localhost:8000")
+
+    # ----------------------------------
+    # start thread
+    # ----------------------------------
+    event_queue = queue.Queue()
+    stop_event = threading.Event()
+    sender_thread = threading.Thread(target=event_sender_worker, args=(event_queue, api_client, stop_event), daemon=True)
+    sender_thread.start()
+
+
+    # ----------------------------------
+    # cameras
+    # ----------------------------------
     manager = MultiCameraManager()
 
-    # cameras
-    #manager.add_camera("webcam", WebcamStream(0, (500, 200, 1000, 600)))
+    manager.add_camera("webcam", WebcamStream(0, (500, 200, 1000, 600)))
     #manager.add_camera("video1", VideoFileStream("../data/videos/1.mp4", (300,200,900,700)))
     #manager.add_camera("video2", VideoFileStream("../data/videos/2.mp4", (450,200,750,600)))
-    manager.add_camera("video3", VideoFileStream("../data/videos/3.mp4", (450,200,750,600)))
+    #manager.add_camera("video3",VideoFileStream("../data/videos/3.mp4", (450,200,750,600)))
 
+    # ----------------------------------
+    # AI models
+    # ----------------------------------
     detector = YOLOv8PersonDetector(conf_threshold=0.5)
-    recognizer = ArcFaceRecognizer("../data/workers", "cuda", 0.45)
+
+    recognizer = ArcFaceRecognizer(
+        api_client=api_client,
+        device="cuda",
+        similarity_threshold=0.45
+    )
 
     tracker = SimpleTracker()
+
     attendance = AttendanceLogic(absent_timeout_seconds=10)
 
     manager.start_all()
+
+    # ----------------------------------
+    # main loop
+    # ----------------------------------
 
     while True:
 
@@ -39,30 +86,33 @@ def main():
             if frame is None:
                 continue
 
-            # draw zone
             zx1, zy1, zx2, zy2 = zone
             cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), (100, 200, 100), 2)
 
-            # detection
             detections = detector.detect(frame)
 
             for det in detections:
 
                 x1, y1, x2, y2 = det["bbox"]
 
-                result = recognizer.recognize(frame, [x1, y1, x2, y2])
+                result = recognizer.recognize(
+                    frame,
+                    [x1, y1, x2, y2]
+                )
 
-                recognized_name = result["name"]
-                face_bbox = result["face_bbox"]
+                name = result["name"]
+                employee_id = result["employee_id"]
+                face_bbox = result.get("face_bbox", [x1, y1, x2, y2])
 
                 track = tracker.update(
                     camera_id=cam_id,
-                    name=recognized_name,
+                    name=name,
+                    employee_id=employee_id,
                     bbox=[x1, y1, x2, y2],
                     zone=zone
                 )
 
-                label = f"ID:{track.track_id} {track.name}"
+                label = f"T{track.track_id} {track.name}"
 
                 if track.inside_zone:
                     label += " IN"
@@ -72,8 +122,8 @@ def main():
                 is_known = track.name != "unknown"
                 color = (0, 255, 0) if is_known else (0, 0, 255)
 
-                # face bbox
                 fx1, fy1, fx2, fy2 = face_bbox
+
                 cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), color, 2)
 
                 cv2.putText(
@@ -86,16 +136,19 @@ def main():
                     2
                 )
 
-            # show frame
             cv2.imshow(cam_id, frame)
 
-        # attendance logic (هر فریم یکبار)
+        # ----------------------------------
+        # attendance logic
+        # ----------------------------------
+
         events = attendance.process_tracks(tracker.tracks)
 
         for e in events:
             print(e)
+            event_queue.put(e)
 
-        # حذف track های خیلی قدیمی
+
         tracker.cleanup_tracks()
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -103,6 +156,9 @@ def main():
 
         time.sleep(0.01)
 
+
+    stop_event.set()
+    sender_thread.join()
     manager.stop_all()
     cv2.destroyAllWindows()
 
