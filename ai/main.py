@@ -2,7 +2,7 @@ import cv2
 import time
 import threading
 import queue
-
+from pathlib import Path 
 from multi_camera_manager import MultiCameraManager
 from cameras.webcam_stream import WebcamStream
 from cameras.video_file_stream import VideoFileStream
@@ -33,6 +33,11 @@ def main():
     # ----------------------------------
     # API
     # ----------------------------------
+    BASE_DIR = Path(__file__).resolve().parent.parent 
+
+    # ----------------------------------
+    # BASE_DIR
+    # ----------------------------------
     api_client = APIClient("http://localhost:8000")
 
     # ----------------------------------
@@ -49,10 +54,26 @@ def main():
     # ----------------------------------
     manager = MultiCameraManager()
 
-    manager.add_camera("webcam", WebcamStream(0, (500, 200, 1000, 600)))
-    #manager.add_camera("video1", VideoFileStream("../data/videos/1.mp4", (300,200,900,700)))
-    #manager.add_camera("video2", VideoFileStream("../data/videos/2.mp4", (450,200,750,600)))
-    #manager.add_camera("video3",VideoFileStream("../data/videos/3.mp4", (450,200,750,600)))
+    cameras_list = api_client.get_cameras()
+    
+    for cam in cameras_list:
+        if cam.get("is_active"):
+            name = cam["name"]
+            cam_type = cam["type"]
+            url = cam["rtsp_url"]
+            relative_path = cam['rtsp_url'] 
+            full_path = BASE_DIR / relative_path
+            # در دیتابیس "zones" ذخیره کردید، در مدل شما [x1, y1, x2, y2] است
+            zone = tuple(cam.get("zones", [0, 0, 0, 0])) 
+
+            if cam_type == "webcam":
+                stream = WebcamStream(int(url) if url.isdigit() else 0, zone)
+            else:
+                # مسیر فایل را با ../ اصلاح می‌کنیم
+                stream = VideoFileStream(str(full_path), zone)
+                
+            manager.add_camera(name, stream)
+            print(f"Loaded camera: {name} with zone {zone}")
 
     # ----------------------------------
     # AI models

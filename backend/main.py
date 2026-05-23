@@ -16,7 +16,10 @@ from routers import embedding
 app = FastAPI()
 
 # ✅ ساخت جدول‌ها
+print("Starting table creation...")
 Base.metadata.create_all(bind=engine)
+print("Tables created.")
+
 
 app.include_router(employees.router)
 app.include_router(cameras.router)

@@ -23,19 +23,10 @@ class APIClient:
         if isinstance(timestamp, datetime):
             timestamp = timestamp.isoformat()
 
-        # ایمن‌سازی camera_id برای تست‌های محلی
-        camera_id = data.get("camera_id")
-        if isinstance(camera_id, str):
-            # اگر رشته مثل 'webcam' بود، مقدار پیش‌فرض بده
-            if camera_id.lower() == "webcam":
-                camera_id = 0  # یا None، بسته به schema backend
-            else:
-                # اگر رشته‌ی URL یا اسم دوربین است، تلاش کن عدد استخراج کنی
-                camera_id = 0
 
         payload = {
             "employee_id": int(data["employee_id"]),
-            "camera_id": int(camera_id),
+            "camera_id": int(data["camera_id"]),
             "event": data["event_type"],
             "track_id": data.get("track_id"),
             "confidence": float(data.get("confidence", 1.0)),
@@ -54,3 +45,14 @@ class APIClient:
         except Exception as e:
             print("[API] event send error:", e)
             return False
+        
+    
+    def get_cameras(self):
+        try:
+            response = requests.get(f"{self.base_url}/cameras/")
+            if response.status_code == 200:
+                return response.json()
+            return []
+        except Exception as e:
+            print("[API] Camera fetch error:", e)
+            return []

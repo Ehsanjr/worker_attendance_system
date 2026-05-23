@@ -14,8 +14,10 @@ def create_camera(camera: CameraCreate, db: Session = Depends(get_db)):
 
     db_camera = Camera(
         name=camera.name,
+        type=camera.type,
         rtsp_url=camera.rtsp_url,
         location=camera.location,
+        zones=camera.zones,
         is_active=camera.is_active
     )
 

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -12,9 +12,13 @@ class Camera(Base):
 
     name = Column(String, nullable=False)
 
+    type = Column(String, nullable=False)
+
     rtsp_url = Column(String, nullable=True)
 
     location = Column(String, nullable=True)
+
+    zones = Column(JSON, nullable=False)
 
     is_active = Column(Boolean, default=True)
 
