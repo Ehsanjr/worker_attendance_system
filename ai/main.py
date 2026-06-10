@@ -143,6 +143,8 @@ def main():
                 is_known = track.name != "unknown"
                 color = (0, 255, 0) if is_known else (0, 0, 255)
 
+                face_bbox = result.get("face_bbox") or [x1, y1, x2, y2]
+                
                 fx1, fy1, fx2, fy2 = face_bbox
 
                 cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), color, 2)

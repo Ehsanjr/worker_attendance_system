@@ -10,7 +10,8 @@ class Employee(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-
+    national_id = Column(String, nullable=True, unique=True)
+    phone_number = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     face_embeddings = relationship(

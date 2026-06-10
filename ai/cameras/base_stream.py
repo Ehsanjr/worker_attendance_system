@@ -1,50 +1,52 @@
 import cv2
-from threading import Thread
-from abc import ABC, abstractmethod
 import time
-
+from threading import Thread
+from abc import ABC
 
 class BaseCameraStream(ABC):
     def __init__(self, source, zone):
-        super().__init__()
         self.source = source
-        self.resize = (1280,720)  # مثلا (960, 540)
-        self.stream = cv2.VideoCapture(source)
+        self.resize = (1280, 720) 
         self.zone = zone
-
-        # Checking whether video source is open or not
-        if not self.stream.isOpened():
-            print(f"[Error] could not open video from {source} source.")
-
-        # Variables for saving frame and status
-        self.grabbed, self.frame = self.stream.read()
-
-        if self.grabbed and self.resize is not None:
-            self.frame = cv2.resize(self.frame, self.resize)
-
+        
+        # بهینه‌سازی بسیار مهم برای وب‌کم‌ها در سیستم‌عامل ویندوز
+        if isinstance(source, int):
+            self.stream = cv2.VideoCapture(source, cv2.CAP_DSHOW)
+        else:
+            self.stream = cv2.VideoCapture(source)
+            
         self.stopped = False
 
+        if not self.stream.isOpened():
+            print(f"❌ [Error] Could not open video source: {source}")
+            self.grabbed = False
+            self.frame = None
+        else:
+            self.grabbed, self.frame = self.stream.read()
+            if self.grabbed and self.resize is not None:
+                self.frame = cv2.resize(self.frame, self.resize)
+
     def start_stream(self):
-        # Reading frames in different threads
-        t = Thread(target=self.update_stream, args=())
-        t.daemon = True
+        self.stopped = False
+        t = Thread(target=self.update_stream, daemon=True)
         t.start()
         return self
 
     def update_stream(self):
-        # Reading new frames in loop
-        while True:
-            if self.stopped:
-                self.stream.release()
-                return
+        is_video_file = isinstance(self.source, str) and not self.source.startswith(("rtsp", "http"))
 
-            # Reading next frame
+        while not self.stopped:
             grabbed, frame = self.stream.read()
-
-            # if video finished or source connection lost
+            
             if not grabbed:
-                self.stop_stream()
-                return
+                if is_video_file:
+                    # ← restart ویدیو از اول
+                    self.stream.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+                else:
+                    print(f"⚠️ [Stream] قطع ارتباط دوربین: {self.source}")
+                    self.stop_stream()
+                    break
 
             if self.resize is not None:
                 frame = cv2.resize(frame, self.resize)
@@ -52,12 +54,13 @@ class BaseCameraStream(ABC):
             self.grabbed = grabbed
             self.frame = frame
 
-            time.sleep(0.01)
+            if is_video_file:
+                time.sleep(0.033)
+
+        self.stream.release()
 
     def read_stream(self):
-        # returning last frame
         return self.frame, self.zone
 
     def stop_stream(self):
-        # Stopping source and release resources
         self.stopped = True
