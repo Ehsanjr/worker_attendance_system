@@ -19,7 +19,11 @@ def create_employee(employee: EmployeeCreate, db: Session = Depends(get_db)):
     db_employee = Employee(
         name=employee.name,
         national_id=employee.national_id,
-        phone_number=employee.phone_number
+        phone_number=employee.phone_number,
+        camera_id=employee.camera_id,
+        allowed_days=employee.allowed_days,
+        shift_start=employee.shift_start,
+        shift_end=employee.shift_end
     )
     db.add(db_employee)
     db.commit()
@@ -43,12 +47,13 @@ def update_employee(employee_id: int, data: EmployeeUpdate, db: Session = Depend
     if not db_employee:
         raise HTTPException(status_code=404, detail="Employee not found")
 
-    if data.name is not None:
-        db_employee.name = data.name
-    if data.national_id is not None:
-        db_employee.national_id = data.national_id
-    if data.phone_number is not None:
-        db_employee.phone_number = data.phone_number
+    if data.name is not None: db_employee.name = data.name
+    if data.national_id is not None: db_employee.national_id = data.national_id
+    if data.phone_number is not None: db_employee.phone_number = data.phone_number
+    if data.camera_id is not None: db_employee.camera_id = data.camera_id
+    if data.allowed_days is not None: db_employee.allowed_days = data.allowed_days
+    if data.shift_start is not None: db_employee.shift_start = data.shift_start
+    if data.shift_end is not None: db_employee.shift_end = data.shift_end
 
     db.commit()
     db.refresh(db_employee)
@@ -63,7 +68,6 @@ def delete_employee(employee_id: int, db: Session = Depends(get_db)):
     db.delete(db_employee)
     db.commit()
     return {"status": "deleted", "employee_id": employee_id}
-
 
 @router.post("/{employee_id}/embeddings")
 def add_face_embedding(employee_id: int, data: FaceEmbeddingCreate, db: Session = Depends(get_db)):

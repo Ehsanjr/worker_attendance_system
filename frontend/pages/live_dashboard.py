@@ -151,7 +151,7 @@ class CentralAIEngineThread(QThread):
                         
                         for det in detections:
                             x1, y1, x2, y2 = map(int, det["bbox"])
-                            result = recognizer.recognize(frame, [x1, y1, x2, y2])
+                            result = recognizer.recognize(frame, [x1, y1, x2, y2], cam_id)
 
                             name = result.get("name", "unknown")
                             employee_id = result.get("employee_id")

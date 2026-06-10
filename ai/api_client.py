@@ -15,14 +15,23 @@ class APIClient:
             print("[API] Embedding fetch error:", e)
             return []
 
+    # --- تابع جدید برای دریافت مشخصات و شیفت‌های کارگران ---
+    def get_employees(self):
+        try:
+            response = requests.get(f"{self.base_url}/employees/")
+            if response.status_code == 200:
+                return response.json()
+            return []
+        except Exception as e:
+            print("[API] Employee fetch error:", e)
+            return []
+
     def send_attendance_event(self, data):
         url = f"{self.base_url}/ai-events/"
-
         timestamp = data["timestamp"]
 
         if isinstance(timestamp, datetime):
             timestamp = timestamp.isoformat()
-
 
         payload = {
             "employee_id": int(data["employee_id"]),
@@ -41,12 +50,10 @@ class APIClient:
             else:
                 print("[API] send failed:", response.text)
                 return False
-
         except Exception as e:
             print("[API] event send error:", e)
             return False
         
-    
     def get_cameras(self):
         try:
             response = requests.get(f"{self.base_url}/cameras/")
