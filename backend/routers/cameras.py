@@ -28,33 +28,27 @@ def create_camera(camera: CameraCreate, db: Session = Depends(get_db)):
     return db_camera
 
 
-@router.get("/", response_model=List[CameraResponse])
+@router.get("/")
 def list_cameras(db: Session = Depends(get_db)):
-
-    cameras = db.query(Camera).all()
-    return cameras
+    # فقط دوربین‌هایی که حذف نشده‌اند
+    return db.query(Camera).filter(Camera.is_deleted == False).all()
 
 
 @router.get("/{camera_id}", response_model=CameraResponse)
 def get_camera(camera_id: int, db: Session = Depends(get_db)):
-
     camera = db.query(Camera).filter(Camera.id == camera_id).first()
-
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
-
     return camera
 
 
 @router.delete("/{camera_id}")
 def delete_camera(camera_id: int, db: Session = Depends(get_db)):
-
-    camera = db.query(Camera).filter(Camera.id == camera_id).first()
-
-    if not camera:
+    db_camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not db_camera:
         raise HTTPException(status_code=404, detail="Camera not found")
-
-    db.delete(camera)
+    
+    # 🔴 حذف نرم دوربین
+    db_camera.is_deleted = True
     db.commit()
-
-    return {"message": "camera deleted"}
+    return {"status": "soft_deleted", "camera_id": camera_id}

@@ -54,7 +54,6 @@ class ArcFaceRecognizer:
     def load_workers(self):
         print("Loading face embeddings and shift rules from API...")
         try:
-            # دریافت همزمان بردارها و اطلاعات شیفت کارگران
             workers_embs = self.api_client.get_all_embeddings()
             employees = self.api_client.get_employees()
 
@@ -62,13 +61,14 @@ class ArcFaceRecognizer:
                 print("[WARNING] No embeddings received from API")
                 return
 
-            # ساخت یک دیکشنری سریع برای دسترسی به اطلاعات کارگر با آیدی
             emp_dict = {emp["id"]: emp for emp in employees}
-
             self.known_embeddings.clear()
 
             for item in workers_embs:
                 employee_id = item["employee_id"]
+                if employee_id not in emp_dict:
+                    continue 
+
                 name = item["name"]
                 emb_list = item["embedding"]
 
@@ -76,14 +76,14 @@ class ArcFaceRecognizer:
                 emb /= norm(emb)
 
                 emp_info = emp_dict.get(employee_id, {})
+                
+                # 🔴 دریافت تمام شیفت‌های فعالِ این کارگر
+                active_shifts = [s for s in emp_info.get("shifts", []) if not s.get("is_deleted", False)]
 
                 self.known_embeddings[employee_id] = {
                     "name": name,
                     "embedding": emb,
-                    "camera_id": emp_info.get("camera_id"),
-                    "allowed_days": emp_info.get("allowed_days", "0,1,2,3,4,5,6"),
-                    "shift_start": emp_info.get("shift_start", "00:00"),
-                    "shift_end": emp_info.get("shift_end", "23:59")
+                    "shifts": active_shifts # ذخیره لیست شیفت‌ها به جای یک شیفت
                 }
 
             print(f"Loaded {len(self.known_embeddings)} workers with shift rules.")
@@ -91,34 +91,44 @@ class ArcFaceRecognizer:
         except Exception as e:
             print("[ERROR] Failed to load embeddings or employees:", e)
 
+            
     # --- الگوریتم تشخیص مجاز بودن شیفت و دوربین (نسخه ضد کِرَش) ---
     def _is_allowed(self, data, current_camera_id):
-        # 1. فیلتر دوربین
-        if data["camera_id"] is not None and str(data["camera_id"]) != str(current_camera_id):
+        shifts = data.get("shifts", [])
+        
+        # اگر کارگر هیچ شیفتی ندارد، یعنی فعلاً اجازه ورود به هیچ دوربینی را ندارد
+        if not shifts:
             return False
 
         now = datetime.now()
-        current_day = str(now.weekday()) # 0=دوشنبه تا 6=یکشنبه
-
-        # 2. فیلتر روزهای مجاز (استفاده از or برای فرار از مقدار None)
-        allowed_days = data.get("allowed_days") or "0,1,2,3,4,5,6"
-        if current_day not in allowed_days.split(","):
-            return False
-
-        # 3. فیلتر ساعت مجاز (استفاده از or برای فرار از مقدار None)
+        current_day = str(now.weekday())
         current_time = now.strftime("%H:%M")
-        start = data.get("shift_start") or "00:00"
-        end = data.get("shift_end") or "23:59"
 
-        if start <= end: # شیفت عادی
-            if not (start <= current_time <= end):
-                return False
-        else: # شیفت شب
-            if not (current_time >= start or current_time <= end):
-                return False
+        # حلقه روی تک‌تک شیفت‌های کارگر؛ اگر حتی یکی از آن‌ها با شرایط فعلی جور در بیاید، مجاز است!
+        for shift in shifts:
+            # 1. فیلتر دوربین
+            if shift["camera_id"] is not None and str(shift["camera_id"]) != str(current_camera_id):
+                continue # این شیفت مال این دوربین نیست، برو شیفت بعدی رو چک کن
 
-        return True
+            # 2. فیلتر روزهای مجاز
+            allowed_days = shift.get("allowed_days") or "0,1,2,3,4,5,6"
+            if current_day not in allowed_days.split(","):
+                continue # امروز در این شیفت مجاز نیست، برو شیفت بعدی
 
+            # 3. فیلتر ساعت مجاز
+            start = shift.get("shift_start") or "00:00"
+            end = shift.get("shift_end") or "23:59"
+
+            if start <= end: # شیفت عادی
+                if (start <= current_time <= end):
+                    return True # مجاز است!
+            else: # شیفت شب
+                if (current_time >= start or current_time <= end):
+                    return True # مجاز است!
+
+        # اگر تمام شیفت‌ها را چک کرد و هیچکدام با زمان/مکان فعلی تطابق نداشت:
+        return False
+    
     def compare_embedding(self, embedding, current_camera_id):
         best_score = -1
         best_id = None

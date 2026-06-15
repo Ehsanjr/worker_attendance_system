@@ -1,346 +1,456 @@
-import os
 import requests
-import pandas as pd
-from datetime import datetime
+import csv
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# استفاده از کتابخانه شمسی برای کل محاسبات
+import jdatetime
+
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
-                             QTableWidgetItem, QPushButton, QHeaderView, 
-                             QMessageBox, QComboBox, QLabel, QStackedWidget, QFileDialog)
+                             QTableWidgetItem, QHeaderView, QPushButton, 
+                             QMessageBox, QLabel, QLineEdit, QComboBox, 
+                             QFileDialog, QCompleter, QDialog)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QTextDocument, QColor, QBrush, QFont
+from PyQt5.QtGui import QColor, QBrush, QFont, QTextDocument
 from PyQt5.QtPrintSupport import QPrinter
 
-# -----------------------------------------------------------------
-# Thread برای بارگذاری همزمان اطلاعات و جلوگیری از فریز شدن UI
-# -----------------------------------------------------------------
-class LoadEventsThread(QThread):
-    data_ready = pyqtSignal(list, dict, dict)
-    error_signal = pyqtSignal(str)
+# =================================================================
+# ۰. دیالوگ پاپ‌آپ اختصاصی برای انتخاب تاریخ و زمان شمسی
+# =================================================================
+class ShamsiDatePickerDialog(QDialog):
+    def __init__(self, initial_jdt, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("انتخاب تاریخ و زمان")
+        self.setFixedSize(380, 150)
+        self.setLayoutDirection(Qt.RightToLeft)
+
+        self.selected_jdt = initial_jdt
+
+        layout = QVBoxLayout(self)
+
+        # --- بخش تاریخ ---
+        date_layout = QHBoxLayout()
+        
+        self.year_cb = QComboBox()
+        self.year_cb.addItems([str(y) for y in range(1400, 1421)])
+        self.year_cb.setCurrentText(str(initial_jdt.year))
+
+        self.month_cb = QComboBox()
+        months = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+                  "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"]
+        self.month_cb.addItems(months)
+        self.month_cb.setCurrentIndex(initial_jdt.month - 1)
+
+        self.day_cb = QComboBox()
+        self.day_cb.addItems([str(d) for d in range(1, 32)])
+        self.day_cb.setCurrentText(str(initial_jdt.day))
+
+        date_layout.addWidget(QLabel("سال:"))
+        date_layout.addWidget(self.year_cb)
+        date_layout.addWidget(QLabel("ماه:"))
+        date_layout.addWidget(self.month_cb)
+        date_layout.addWidget(QLabel("روز:"))
+        date_layout.addWidget(self.day_cb)
+        layout.addLayout(date_layout)
+
+        # --- بخش زمان ---
+        time_layout = QHBoxLayout()
+        
+        self.hour_cb = QComboBox()
+        self.hour_cb.addItems([f"{h:02d}" for h in range(24)])
+        self.hour_cb.setCurrentText(f"{initial_jdt.hour:02d}")
+
+        self.min_cb = QComboBox()
+        self.min_cb.addItems([f"{m:02d}" for m in range(60)])
+        self.min_cb.setCurrentText(f"{initial_jdt.minute:02d}")
+
+        time_layout.addWidget(QLabel("ساعت:"))
+        time_layout.addWidget(self.hour_cb)
+        time_layout.addWidget(QLabel(":"))
+        time_layout.addWidget(self.min_cb)
+        time_layout.addStretch()
+        layout.addLayout(time_layout)
+
+        # --- دکمه‌ها ---
+        btn_layout = QHBoxLayout()
+        save_btn = QPushButton("تایید و اعمال فیلتر")
+        save_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold; padding: 6px;")
+        save_btn.clicked.connect(self.accept_date)
+        
+        cancel_btn = QPushButton("انصراف")
+        cancel_btn.setStyleSheet("background-color: #95a5a6; color: white; padding: 6px;")
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def accept_date(self):
+        y = int(self.year_cb.currentText())
+        m = self.month_cb.currentIndex() + 1
+        d = int(self.day_cb.currentText())
+        h = int(self.hour_cb.currentText())
+        minute = int(self.min_cb.currentText())
+
+        try:
+            # بررسی صحت تاریخ (مثلا کاربر ۳۱ اسفند انتخاب نکرده باشد)
+            self.selected_jdt = jdatetime.datetime(y, m, d, h, minute)
+            self.accept()
+        except ValueError:
+            QMessageBox.warning(self, "خطا", "تاریخ انتخاب شده نامعتبر است (مثلاً این ماه ۳۱ روز ندارد).")
+
+# =================================================================
+# ۱. پردازشگر پیش‌زمینه (استخراج همزمان رخدادها، دوربین‌ها و کارگران)
+# =================================================================
+class FetchAbsencesThread(QThread):
+    data_ready = pyqtSignal(list, dict, dict) 
+    error_occurred = pyqtSignal(str)
 
     def run(self):
         try:
-            # ۱. دریافت لیست کارگران برای مپ کردن آیدی به اسم
-            workers_map = {}
-            w_res = requests.get("http://localhost:8000/employees/")
-            if w_res.status_code == 200:
-                for w in w_res.json():
-                    workers_map[w["id"]] = w["name"]
+            cam_res = requests.get("http://localhost:8000/cameras/")
+            cam_map = {}
+            if cam_res.status_code == 200:
+                for c in cam_res.json():
+                    cam_map[c["id"]] = c.get("location") or c.get("name") or f"دوربین {c['id']}"
 
-            # ۲. دریافت لیست دوربین‌ها برای مپ کردن آیدی به لوکیشن
-            cameras_map = {}
-            c_res = requests.get("http://localhost:8000/cameras/")
-            if c_res.status_code == 200:
-                for c in c_res.json():
-                    cameras_map[c["id"]] = c.get("location") or c.get("name") or "نامشخص"
+            emp_res = requests.get("http://localhost:8000/employees/")
+            emp_map = {}
+            if emp_res.status_code == 200:
+                for e in emp_res.json():
+                    emp_map[e["id"]] = e["name"]
 
-            # ۳. دریافت کل رخدادها
-            e_res = requests.get("http://localhost:8000/attendance/")
-            events = e_res.json() if e_res.status_code == 200 else []
+            response = requests.get("http://localhost:8000/attendance/")
+            if response.status_code != 200:
+                self.error_occurred.emit("خطا در دریافت رخدادها از سرور.")
+                return
 
-            self.data_ready.emit(events, workers_map, cameras_map)
+            raw_events = response.json()
+            raw_events.sort(key=lambda x: x.get("timestamp", ""))
+
+            events_by_worker = {}
+            for ev in raw_events:
+                emp_id = ev.get("employee_id")
+                if emp_id is not None:
+                    events_by_worker.setdefault(emp_id, []).append(ev)
+
+            absences_list = []
+            id_counter = 1
+
+            for emp_id, ev_list in events_by_worker.items():
+                worker_name = emp_map.get(emp_id, f"کارگر ناشناس (آیدی: {emp_id})")
+                absence_start_time = None
+                last_camera_id = None
+
+                for ev in ev_list:
+                    ev_type = str(ev.get("event_type") or ev.get("status") or "").lower()
+                    cam_id = ev.get("camera_id")
+                    
+                    t_str = ev.get("timestamp", "").replace("T", " ").replace("Z", "").split(".")[0]
+                    try:
+                        dt_obj = datetime.strptime(t_str, "%Y-%m-%d %H:%M:%S")
+                    except: 
+                        continue
+
+                    if ev_type in ["exit", "out"]:
+                        if absence_start_time == None:
+                            absence_start_time = dt_obj
+                            last_camera_id = cam_id
+                    
+                    elif ev_type in ["enter", "in"]:
+                        if absence_start_time is not None:
+                            absences_list.append({
+                                "id": id_counter,
+                                "worker_name": worker_name,
+                                "camera_id": last_camera_id,
+                                "camera_location": cam_map.get(last_camera_id, f"دوربین {last_camera_id}"),
+                                "start_dt": absence_start_time,
+                                "end_dt": dt_obj,
+                            })
+                            id_counter += 1
+                            absence_start_time = None
+
+                if absence_start_time is not None:
+                    absences_list.append({
+                        "id": id_counter,
+                        "worker_name": worker_name,
+                        "camera_id": last_camera_id,
+                        "camera_location": cam_map.get(last_camera_id, f"دوربین {last_camera_id}"),
+                        "start_dt": absence_start_time,
+                        "end_dt": None, 
+                    })
+                    id_counter += 1
+
+            absences_list.sort(key=lambda x: x["start_dt"], reverse=True)
+            self.data_ready.emit(absences_list, cam_map, emp_map)
+
         except Exception as e:
-            self.error_signal.emit(str(e))
+            self.error_occurred.emit(str(e))
 
-# -----------------------------------------------------------------
-# کلاس اصلی صفحه رخدادها
-# -----------------------------------------------------------------
+# =================================================================
+# ۲. کلاس اصلی صفحه گزارشات هوشمند
+# =================================================================
 class EventsPage(QWidget):
     def __init__(self):
         super().__init__()
         self.setLayoutDirection(Qt.RightToLeft)
-        
-        # متغیرهای ذخیره داده‌ها
-        self.all_events = []
-        self.workers_map = {}
-        self.cameras_map = {}
-        self.current_view = "all" # می تواند all یا absences باشد
+        self.all_absences = [] 
 
-        # لایوت اصلی
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(15)
 
-        # ---------------------------------------------------------
-        # نوار ابزار بالا (فیلترها و دکمه‌های خروجی)
-        # ---------------------------------------------------------
-        top_bar = QHBoxLayout()
+        title_label = QLabel("گزارشات تحلیلی و بازه‌های غیبت کارگران")
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
+        main_layout.addWidget(title_label)
+
+        # ---------------- پنل فیلترها ----------------
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(10)
+
+        self.txt_filter_name = QLineEdit()
+        self.txt_filter_name.setPlaceholderText("🔍 جستجوی نام کارگر...")
+        self.txt_filter_name.setFixedWidth(150)
+        self.txt_filter_name.textChanged.connect(self.apply_ui_filters)
+        filter_layout.addWidget(self.txt_filter_name)
+
+        self.combo_filter_cam = QComboBox()
+        self.combo_filter_cam.setFixedWidth(140)
+        self.combo_filter_cam.currentIndexChanged.connect(self.apply_ui_filters)
+        filter_layout.addWidget(self.combo_filter_cam)
+
+        # متغیرهای نگه‌داری زمان انتخابی
+        now_dt = datetime.now()
+        self.j_from_dt = jdatetime.datetime.fromgregorian(datetime=now_dt - timedelta(days=7))
+        self.j_to_dt = jdatetime.datetime.fromgregorian(datetime=now_dt + timedelta(days=1))
+
+        # دکمه‌های باز کننده پاپ‌آپ انتخاب تاریخ
+        filter_layout.addWidget(QLabel("از:"))
+        self.btn_date_from = QPushButton(self.j_from_dt.strftime("%Y/%m/%d - %H:%M"))
+        self.btn_date_from.setStyleSheet("background-color: white; border: 1px solid #bdc3c7; padding: 4px;")
+        self.btn_date_from.clicked.connect(self.pick_from_date)
+        filter_layout.addWidget(self.btn_date_from)
+
+        filter_layout.addWidget(QLabel("تا:"))
+        self.btn_date_to = QPushButton(self.j_to_dt.strftime("%Y/%m/%d - %H:%M"))
+        self.btn_date_to.setStyleSheet("background-color: white; border: 1px solid #bdc3c7; padding: 4px;")
+        self.btn_date_to.clicked.connect(self.pick_to_date)
+        filter_layout.addWidget(self.btn_date_to)
+
+        # دکمه‌های خروجی
+        self.btn_export_excel = QPushButton("خروجی اکسل 🟢")
+        self.btn_export_excel.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; padding: 6px 12px;")
+        self.btn_export_excel.clicked.connect(self.export_to_excel)
         
-        # فیلتر کارگر
-        top_bar.addWidget(QLabel("فیلتر کارگر:"))
-        self.worker_combo = QComboBox()
-        self.worker_combo.setFixedWidth(180)
-        self.worker_combo.currentIndexChanged.connect(self.filter_data)
-        top_bar.addWidget(self.worker_combo)
-        
-        top_bar.addSpacing(15)
+        self.btn_export_pdf = QPushButton("خروجی PDF 🔴")
+        self.btn_export_pdf.setStyleSheet("background-color: #c0392b; color: white; font-weight: bold; padding: 6px 12px;")
+        self.btn_export_pdf.clicked.connect(self.export_to_pdf)
 
-        # دکمه محاسبه غیبت‌ها (کامپاند کاملاً هوشمند)
-        self.btn_toggle_view = QPushButton("📊 محاسبه مدت زمان غیبت")
-        self.btn_toggle_view.setStyleSheet("background-color: #9b59b6; color: white; font-weight: bold; padding: 7px 15px;")
-        self.btn_toggle_view.clicked.connect(self.toggle_view)
-        top_bar.addWidget(self.btn_toggle_view)
+        filter_layout.addStretch()
+        filter_layout.addWidget(self.btn_export_excel)
+        filter_layout.addWidget(self.btn_export_pdf)
+        main_layout.addLayout(filter_layout)
 
-        top_bar.addStretch() # هل دادن دکمه‌های خروجی به سمت چپ
+        # ---------------- جدول اصلی ----------------
+        self.table = QTableWidget()
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels([
+            "آیدی", "نام کارگر", "موقعیت دوربین", "زمان آغاز غیبت", "زمان پایان غیبت", "مدت زمان غیبت"
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setColumnHidden(0, True)
+        main_layout.addWidget(self.table)
 
-        # دکمه‌های اکسل و PDF
-        self.btn_excel = QPushButton("خروجی اکسل 📄")
-        self.btn_excel.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; padding: 7px 15px;")
-        self.btn_excel.clicked.connect(self.export_to_excel)
-        
-        self.btn_pdf = QPushButton("خروجی پی‌دی‌اف 🟥")
-        self.btn_pdf.setStyleSheet("background-color: #c0392b; color: white; font-weight: bold; padding: 7px 15px;")
-        self.btn_pdf.clicked.connect(self.export_to_pdf)
+        self.load_data()
 
-        top_bar.addWidget(self.btn_excel)
-        top_bar.addWidget(self.btn_pdf)
-        main_layout.addLayout(top_bar)
+    # =================================================================
+    # توابع باز کردن دیالوگ انتخاب تاریخ
+    # =================================================================
+    def pick_from_date(self):
+        dlg = ShamsiDatePickerDialog(self.j_from_dt, self)
+        if dlg.exec_() == QDialog.Accepted:
+            self.j_from_dt = dlg.selected_jdt
+            self.btn_date_from.setText(self.j_from_dt.strftime("%Y/%m/%d - %H:%M"))
+            self.apply_ui_filters() # اعمال آنی فیلتر
 
-        # ---------------------------------------------------------
-        # بخش جداول (Stacked Widget)
-        # ---------------------------------------------------------
-        self.table_stack = QStackedWidget()
-        main_layout.addWidget(self.table_stack)
+    def pick_to_date(self):
+        dlg = ShamsiDatePickerDialog(self.j_to_dt, self)
+        if dlg.exec_() == QDialog.Accepted:
+            self.j_to_dt = dlg.selected_jdt
+            self.btn_date_to.setText(self.j_to_dt.strftime("%Y/%m/%d - %H:%M"))
+            self.apply_ui_filters() # اعمال آنی فیلتر
 
-        # جدول شماره ۱: کل رخدادها
-        self.table_all = QTableWidget()
-        self.table_all.setColumnCount(5)
-        self.table_all.setHorizontalHeaderLabels(["آیدی رخداد", "اسم کارگر", "موقعیت دوربین", "نوع رخداد", "زمان دقیق"])
-        self.table_all.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table_stack.addWidget(self.table_all)
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.load_data()
 
-        # جدول شماره ۲: غیبت‌ها
-        self.table_absences = QTableWidget()
-        self.table_absences.setColumnCount(5)
-        self.table_absences.setHorizontalHeaderLabels(["ردیف", "اسم کارگر", "مدت زمان غیبت", "تاریخ و زمان غیبت", "لوکیشن دوربین"])
-        self.table_absences.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table_stack.addWidget(self.table_absences)
-
-        # بارگذاری اولیه داده‌ها
-        self.refresh_data()
-
-    def refresh_data(self):
-        self.thread = LoadEventsThread()
+    def load_data(self):
+        self.thread = FetchAbsencesThread()
         self.thread.data_ready.connect(self.on_data_loaded)
-        self.thread.error_signal.connect(lambda msg: QMessageBox.critical(self, "خطا", f"خطا در لود داده: {msg}"))
+        self.thread.error_occurred.connect(lambda err: QMessageBox.warning(self, "خطا", err))
         self.thread.start()
 
-    def on_data_loaded(self, events, workers_map, cameras_map):
-        self.all_events = events
-        self.workers_map = workers_map
-        self.cameras_map = cameras_map
-
-        # پر کردن کومبوباکس فیلتر کارگران
-        self.worker_combo.blockSignals(True)
-        self.worker_combo.clear()
-        self.worker_combo.addItem("همه کارگران", None)
-        for w_id, w_name in self.workers_map.items():
-            self.worker_combo.addItem(w_name, w_id)
-        self.worker_combo.blockSignals(False)
-
-        self.filter_data()
-
-    def toggle_view(self):
-        """سوئیچ بین جدول کل رخدادها و جدول غیبت‌ها"""
-        if self.current_view == "all":
-            self.current_view = "absences"
-            self.btn_toggle_view.setText("👁 مشاهده همه رخدادها")
-            self.btn_toggle_view.setStyleSheet("background-color: #34495e; color: white; font-weight: bold; padding: 7px 15px;")
-            self.table_stack.setCurrentIndex(1) # نمایش جدول غیبت‌ها
-        else:
-            self.current_view = "all"
-            self.btn_toggle_view.setText("📊 محاسبه مدت زمان غیبت")
-            self.btn_toggle_view.setStyleSheet("background-color: #9b59b6; color: white; font-weight: bold; padding: 7px 15px;")
-            self.table_stack.setCurrentIndex(0) # نمایش جدول رخدادها
+    def on_data_loaded(self, absences, cam_map, emp_map):
+        self.all_absences = absences
         
-        self.filter_data()
+        self.combo_filter_cam.blockSignals(True)
+        self.combo_filter_cam.clear()
+        self.combo_filter_cam.addItem("همه دوربین‌ها", None)
+        for c_id, c_name in cam_map.items():
+            self.combo_filter_cam.addItem(c_name, c_id)
+        self.combo_filter_cam.blockSignals(False)
 
-    def filter_data(self):
-        """فیلتر و پردازش هوشمند آرایه‌ها بر اساس کارگر انتخاب شده"""
-        selected_worker_id = self.worker_combo.currentData()
+        worker_names = list(emp_map.values())
+        completer = QCompleter(worker_names, self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains) 
+        self.txt_filter_name.setCompleter(completer)
 
-        # ۱. فیلتر کردن رخدادهای خام بر اساس کارگر
-        filtered_events = self.all_events
-        if selected_worker_id is not None:
-            filtered_events = [e for e in self.all_events if e.get("employee_id") == selected_worker_id]
+        self.apply_ui_filters()
 
-        # مرتب‌سازی رخدادها بر اساس زمان برای پایداری محاسبات غیبت
-        filtered_events = sorted(filtered_events, key=lambda x: x.get("timestamp", ""))
-
-        if self.current_view == "all":
-            self.populate_all_events_table(filtered_events)
-        else:
-            self.populate_absences_table(filtered_events, selected_worker_id)
-
-    def populate_all_events_table(self, events):
-        self.table_all.setRowCount(0)
-        for row_idx, ev in enumerate(events):
-            self.table_all.insertRow(row_idx)
-            
-            # استخراج نام کارگر و لوکیشن دوربین از روی دیکشنری مپینگ
-            worker_name = self.workers_map.get(ev.get("employee_id"), f"کارگر {ev.get('employee_id')}")
-            camera_loc = self.cameras_map.get(ev.get("camera_id"), "لوکیشن نامشخص")
-            
-            status_raw = ev.get("event_type") or ev.get("status") or ev.get("type") or "---"
-            status_text = "ورود" if status_raw.upper() in ["IN", "ENTER"] else "خروج" if status_raw.upper() in ["OUT", "EXIT", "ABSENT"] else status_raw
-
-            time_str = ev.get("timestamp", "---").replace("T", "  ").split(".")[0]
-
-            self.table_all.setItem(row_idx, 0, QTableWidgetItem(str(ev.get("id", "---"))))
-            self.table_all.setItem(row_idx, 1, QTableWidgetItem(worker_name))
-            self.table_all.setItem(row_idx, 2, QTableWidgetItem(camera_loc))
-            
-            status_item = QTableWidgetItem(status_text)
-            
-            # --- تنظیم فونت بولد ---
-            font = status_item.font()
-            font.setBold(True)
-            status_item.setFont(font)
-            
-            # --- تنظیم رنگ متن (Foreground) به جای استایل‌شیت ---
-            if status_raw.upper() in ["IN", "ENTER"]:
-                status_item.setForeground(QBrush(QColor("#2ecc71"))) # رنگ سبز برای ورود
-            elif status_raw.upper() in ["OUT", "EXIT", "ABSENT"]:
-                status_item.setForeground(QBrush(QColor("#e74c3c"))) # رنگ قرمز برای خروج و غیبت
-                
-            self.table_all.setItem(row_idx, 3, status_item)
-            
-            self.table_all.setItem(row_idx, 4, QTableWidgetItem(time_str))
-
-    def populate_absences_table(self, events, selected_worker_id):
-        """الگوریتم پیشرفته محاسبه زمان غیبت‌ها بر اساس منطق درخواستی شما"""
-        self.table_absences.setRowCount(0)
+    # =================================================================
+    # اعمال فیلترینگ و رنگ‌بندی
+    # =================================================================
+    def apply_ui_filters(self):
+        name_query = self.txt_filter_name.text().strip().lower()
+        target_cam_id = self.combo_filter_cam.currentData()
         
-        # گروه‌بندی رخدادها بر اساس کارگر برای زمانی که گزینه «همه» انتخاب شده است
-        from collections import defaultdict
-        events_by_worker = defaultdict(list)
-        for ev in events:
-            events_by_worker[ev.get("employee_id")].append(ev)
+        # گرفتن زمان میلادی از آبجکت‌های شمسی ذخیره شده
+        from_dt = self.j_from_dt.togregorian()
+        to_dt = self.j_to_dt.togregorian()
 
-        row_counter = 0
+        self.table.setRowCount(0)
+        row_idx = 0
+        THRESHOLD_MINUTES = 15 
 
-        for w_id, w_events in events_by_worker.items():
-            worker_name = self.workers_map.get(w_id, f"کارگر {w_id}")
-            pending_absent_time = None
-            pending_camera_loc = "نامشخص"
+        for abs_rec in self.all_absences:
+            if name_query and name_query not in abs_rec["worker_name"].lower():
+                continue
+            if target_cam_id is not None and abs_rec["camera_id"] != target_cam_id:
+                continue
+            if not (from_dt <= abs_rec["start_dt"] <= to_dt):
+                continue
 
-            for ev in w_events:
-                status_raw = (ev.get("event_type") or ev.get("status") or ev.get("type") or "").upper()
-                time_raw = ev.get("timestamp", "")
+            self.table.insertRow(row_idx)
 
-                # الف) تشخیص ثبت رخداد غیبت (absent)
-                if status_raw == "ABSENT":
-                    try:
-                        pending_absent_time = datetime.fromisoformat(time_raw.replace("Z", ""))
-                        pending_camera_loc = self.cameras_map.get(ev.get("camera_id"), "لوکیشن نامشخص")
-                    except:
-                        pending_absent_time = None
+            start_shamsi = self.to_shamsi(abs_rec["start_dt"])
+            end_shamsi = self.to_shamsi(abs_rec["end_dt"])
+            duration_text = self.calculate_duration_str(abs_rec["start_dt"], abs_rec["end_dt"])
 
-                # ب) تشخیص ورود بعدی کارگر (enter یا IN)
-                elif status_raw in ["ENTER", "IN"] and pending_absent_time is not None:
-                    try:
-                        enter_time = datetime.fromisoformat(time_raw.replace("Z", ""))
-                        # محاسبه اختلاف زمان دقیق غیبت
-                        duration = enter_time - pending_absent_time
-                        
-                        # تبدیل اختلاف زمان به فرمت قابل فهم (دقیقه و ثانیه)
-                        total_seconds = int(duration.total_seconds())
-                        minutes = total_seconds // 60
-                        seconds = total_seconds % 60
-                        duration_str = f"{minutes} دقیقه و {seconds} ثانیه"
+            self.table.setItem(row_idx, 0, QTableWidgetItem(str(abs_rec["id"])))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(abs_rec["worker_name"]))
+            self.table.setItem(row_idx, 2, QTableWidgetItem(abs_rec["camera_location"]))
+            self.table.setItem(row_idx, 3, QTableWidgetItem(start_shamsi))
+            
+            end_item = QTableWidgetItem(end_shamsi)
+            dur_item = QTableWidgetItem(duration_text)
 
-                        # ثبت ردیف در جدول غیبت‌ها
-                        self.table_absences.insertRow(row_counter)
-                        self.table_absences.setItem(row_counter, 0, QTableWidgetItem(str(row_counter + 1)))
-                        self.table_absences.setItem(row_counter, 1, QTableWidgetItem(worker_name))
-                        self.table_absences.setItem(row_counter, 2, QTableWidgetItem(duration_str))
-                        self.table_absences.setItem(row_counter, 3, QTableWidgetItem(str(pending_absent_time).split(".")[0]))
-                        self.table_absences.setItem(row_counter, 4, QTableWidgetItem(pending_camera_loc))
-                        
-                        row_counter += 1
-                    except Exception as ex:
-                        print(f"Error parse time: {ex}")
-                    
-                    # ریست کردن وضعیت پندینگ برای غیبت بعدی کارگر
-                    pending_absent_time = None
+            if abs_rec["end_dt"] is None:
+                end_item.setForeground(QBrush(QColor("#e74c3c")))
+                end_item.setFont(QFont("Tahoma", -1, QFont.Bold))
+                dur_item.setForeground(QBrush(QColor("#e74c3c")))
+                dur_item.setFont(QFont("Tahoma", -1, QFont.Bold))
+            else:
+                delta = abs_rec["end_dt"] - abs_rec["start_dt"]
+                if delta.total_seconds() <= (THRESHOLD_MINUTES * 60):
+                    dur_item.setForeground(QBrush(QColor("#2ecc71")))
+                    dur_item.setFont(QFont("Tahoma", -1, QFont.Bold))
+                else:
+                    dur_item.setForeground(QBrush(QColor("#e74c3c")))
+                    dur_item.setFont(QFont("Tahoma", -1, QFont.Bold))
 
-    # ---------------------------------------------------------
-    # خروجی اکسل (Excel Export)
-    # ---------------------------------------------------------
+            self.table.setItem(row_idx, 4, end_item)
+            self.table.setItem(row_idx, 5, dur_item)
+
+            for col in [0, 2, 3, 4, 5]:
+                item = self.table.item(row_idx, col)
+                if item: item.setTextAlignment(Qt.AlignCenter)
+
+            row_idx += 1
+
+    # =================================================================
+    # توابع کمکی
+    # =================================================================
+    def to_shamsi(self, dt_obj):
+        if dt_obj is None:
+            return "همچنان غایب 🏃‍♂️"
+        j_dt = jdatetime.datetime.fromgregorian(datetime=dt_obj)
+        return j_dt.strftime("%Y/%m/%d - %H:%M")
+
+    def calculate_duration_str(self, start_dt, end_dt):
+        end = end_dt if end_dt is not None else datetime.now()
+        delta = end - start_dt
+
+        days = delta.days
+        hours, remainder = divmod(delta.seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+
+        parts = []
+        if days > 0: parts.append(f"{days} روز")
+        if hours > 0: parts.append(f"{hours} ساعت")
+        if minutes > 0: parts.append(f"{minutes} دقیقه")
+
+        return " و ".join(parts) if parts else "کمتر از یک دقیقه"
+
+    # =================================================================
+    # خروجی‌ها
+    # =================================================================
     def export_to_excel(self):
-        active_table = self.table_all if self.current_view == "all" else self.table_absences
-        if active_table.rowCount() == 0:
-            QMessageBox.warning(self, "گزارش خالی", "هیچ داده‌ای برای خروجی گرفتن وجود ندارد.")
-            return
+        path, _ = QFileDialog.getSaveFileName(self, "ذخیره فایل اکسل", "", "Excel CSV (*.csv)")
+        if not path: return
+        try:
+            with open(path, mode='w', encoding='utf-8-sig', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(["نام کارگر", "موقعیت دوربین", "زمان آغاز غیبت", "زمان پایان غیبت", "مدت زمان غیبت"])
+                for row in range(self.table.rowCount()):
+                    writer.writerow([self.table.item(row, c).text() for c in range(1, 6)])
+            QMessageBox.information(self, "موفق", "گزارش اکسل با موفقیت ذخیره شد.")
+        except Exception as e:
+            QMessageBox.critical(self, "خطا", f"خطا در ساخت فایل اکسل:\n{str(e)}")
 
-        # خواندن عناوین هدر
-        headers = [active_table.horizontalHeaderItem(i).text() for i in range(active_table.columnCount())]
-        
-        # استخراج داده‌های جدول فرانت
-        row_data = []
-        for row in range(active_table.rowCount()):
-            current_row = []
-            for col in range(active_table.columnCount()):
-                item = active_table.item(row, col)
-                current_row.append(item.text() if item else "")
-            row_data.append(current_row)
-
-        # ذخیره فایل با QFileDialog
-        file_name, _ = QFileDialog.getSaveFileName(self, "ذخیره خروجی اکسل", "", "Excel Files (*.xlsx)")
-        if file_name:
-            if not file_name.endswith('.xlsx'):
-                file_name += '.xlsx'
-            try:
-                df = pd.DataFrame(row_data, columns=headers)
-                df.to_excel(file_name, index=False)
-                QMessageBox.information(self, "موفقیت", "فایل اکسل گزارش با موفقیت ذخیره شد.")
-            except Exception as e:
-                QMessageBox.critical(self, "خطا", f"خطا در ذخیره فایل اکسل: {e}")
-
-    # ---------------------------------------------------------
-    # خروجی پی‌دی‌اف واقعی و تمیز (PDF Export)
-    # ---------------------------------------------------------
     def export_to_pdf(self):
-        active_table = self.table_all if self.current_view == "all" else self.table_absences
-        if active_table.rowCount() == 0:
-            QMessageBox.warning(self, "گزارش خالی", "هیچ داده‌ای برای خروجی گرفتن وجود ندارد.")
-            return
+        path, _ = QFileDialog.getSaveFileName(self, "ذخیره فایل PDF", "", "PDF Files (*.pdf)")
+        if not path: return
+        try:
+            printer = QPrinter() 
+            printer.setOutputFormat(QPrinter.PdfFormat)
+            printer.setPaperSize(QPrinter.A4)
+            printer.setOrientation(QPrinter.Portrait)
+            printer.setPageMargins(15, 15, 15, 15, QPrinter.Millimeter)
+            printer.setOutputFileName(path)
 
-        file_name, _ = QFileDialog.getSaveFileName(self, "ذخیره خروجی PDF", "", "PDF Files (*.pdf)")
-        if file_name:
-            if not file_name.endswith('.pdf'):
-                file_name += '.pdf'
-            
-            # تولید یک بدنه HTML راست‌چین و شیک برای تبدیل به PDF بومی
-            headers = [active_table.horizontalHeaderItem(i).text() for i in range(active_table.columnCount())]
-            
-            title_text = "گزارش جامع کلیه رخدادهای سیستم" if self.current_view == "all" else "گزارش تخصصی محاسبه غیبت‌های کارگران"
-            
-            html = f"""
-            <div dir="rtl" style="font-family: Arial; padding: 20px;">
-                <h2 style="text-align: center; color: #2c3e50;">{title_text}</h2>
-                <p style="text-align: left; font-size: 12px; color: #7f8c8d;">تاریخ گزارش: {datetime.now().strftime('%Y-%m-%d  %H:%M')}</p>
-                <table border="1" cellspacing="0" cellpadding="8" style="width: 100%; border-collapse: collapse; text-align: center;">
+            html = """
+            <div dir="rtl" style="font-family: Tahoma, sans-serif; padding: 10px;">
+                <h2 style="text-align: center; color: #2c3e50; font-size: 20px; margin-bottom: 5px;">گزارش بازه‌های غیبت کارگران</h2>
+                <p style="text-align: center; font-size: 11px; color: #7f8c8d;">تاریخ استخراج: """ + self.to_shamsi(datetime.now()) + """</p>
+                <hr style="border: 0.5px solid #bdc3c7; margin-bottom: 20px;">
+                <table border="1" cellspacing="0" cellpadding="8" style="width: 100%; border-collapse: collapse; text-align: center; font-size: 13px;">
                     <tr style="background-color: #34495e; color: white; font-weight: bold;">
+                        <th style="padding: 10px;">ردیف</th>
+                        <th>نام کارگر</th>
+                        <th>موقعیت دوربین</th>
+                        <th>زمان آغاز غیبت</th>
+                        <th>زمان پایان غیبت</th>
+                        <th>مدت غیبت</th>
+                    </tr>
             """
-            for h in headers:
-                html += f"<th>{h}</th>"
-            html += "</tr>"
+            for row in range(self.table.rowCount()):
+                bg_color = "#f9f9f9" if row % 2 == 0 else "#ffffff"
+                html += f"""
+                    <tr style="background-color: {bg_color};">
+                        <td style="padding: 8px;">{row + 1}</td>
+                        <td style="text-align: right; padding-right: 10px;">{self.table.item(row, 1).text()}</td>
+                        <td>{self.table.item(row, 2).text()}</td>
+                        <td>{self.table.item(row, 3).text()}</td>
+                        <td>{self.table.item(row, 4).text()}</td>
+                        <td style="color: #d35400; font-weight: bold;">{self.table.item(row, 5).text()}</td>
+                    </tr>
+                """
 
-            for row in range(active_table.rowCount()):
-                html += "<tr>"
-                for col in range(active_table.columnCount()):
-                    item = active_table.item(row, col)
-                    html += f"<td>{item.text() if item else ''}</td>"
-                html += "</tr>"
-            
             html += "</table></div>"
-
-            # عملیات پرینت و ذخیره نهایی به PDF بومی ویندوز
             doc = QTextDocument()
             doc.setHtml(html)
-            
-            printer = QPrinter(QPrinter.HighResolution)
-            printer.setOutputFormat(QPrinter.PdfFormat)
-            printer.setOutputFileName(file_name)
-            
             doc.print_(printer)
-            QMessageBox.information(self, "موفقیت", "فایل PDF گزارش با موفقیت ذخیره گردید.")
+            QMessageBox.information(self, "موفق", "فایل گزارش PDF با موفقیت ساخته شد.")
+        except Exception as e:
+            QMessageBox.critical(self, "خطا", f"خطا در ساخت فایل PDF:\n{str(e)}")

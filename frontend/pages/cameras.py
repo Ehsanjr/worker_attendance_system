@@ -294,6 +294,7 @@ class CamerasPage(QWidget):
         self.table = QTableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["آیدی", "نام / نوع دوربین", "موقعیت (Location)", "وضعیت فعالیت", "عملیات"])
+        self.table.setColumnHidden(0, True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents) 
         self.table.setColumnWidth(4, 150) # عرض ثابت برای دکمه‌ها

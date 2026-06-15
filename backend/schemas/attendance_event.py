@@ -4,8 +4,8 @@ from typing import Optional
 
 
 class AttendanceEventBase(BaseModel):
-    employee_id: int
-    camera_id: int
+    employee_id: Optional[int] = None
+    camera_id: Optional[int] = None
     event_type: str
     confidence: Optional[float] = None
     track_id: Optional[int] = None
