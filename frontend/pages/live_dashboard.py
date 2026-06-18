@@ -24,6 +24,34 @@ from tracker import SimpleTracker
 from attendance_logic import AttendanceLogic
 from api_client import APIClient
 
+from PIL import ImageFont, ImageDraw, Image
+import arabic_reshaper
+from bidi.algorithm import get_display
+import numpy as np
+
+def put_persian_text(frame, text, position, color=(0, 255, 0), font_size=20):
+    """تابع کمکی برای نوشتن متن فارسی روی فریم‌های OpenCV"""
+    # تبدیل فریم OpenCV به فرمت قابل فهم برای PIL
+    img_pil = Image.fromarray(frame)
+    draw = ImageDraw.Draw(img_pil)
+    
+    # مرتب‌سازی حروف فارسی از راست به چپ و چسباندن آن‌ها به هم
+    reshaped_text = arabic_reshaper.reshape(text)
+    bidi_text = get_display(reshaped_text)
+    
+    try:
+        # استفاده از فونت استاندارد ویندوز (Tahoma)
+        font = ImageFont.truetype("tahoma.ttf", font_size)
+    except:
+        font = ImageFont.load_default()
+        
+    # رسم متن
+    draw.text(position, bidi_text, font=font, fill=color)
+    
+    # بازگرداندن فریم به فرمت آرایه OpenCV
+    np.copyto(frame, np.array(img_pil))
+    return frame
+
 # -----------------------------------------------------------------
 # تابع ارسال دیتای تردد به بک‌اند (کپی دقیق از منطق شما)
 # -----------------------------------------------------------------
@@ -181,7 +209,22 @@ class CentralAIEngineThread(QThread):
 
                         fx1, fy1, fx2, fy2 = map(int, face_bbox)
                         cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), color, 2)
-                        cv2.putText(frame, label, (fx1, fy1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+                        # ۱. استخراج وضعیت از ترکر (بر اساس کدهای tracker.py شما)
+                        status_str = "داخل" if track.inside_zone else "بیرون"
+
+                        # ۲. ترکیب نام و وضعیت با یک خط تیره برای جلوگیری از به هم ریختگی حروف فارسی
+                        display_text = f"{name} - {status_str}"
+
+                        # ۳. محاسبه موقعیت Y به صورت داینامیک (چسبیده به سقف باکس)
+                        font_size = 30
+            
+                        if fy1 <= 0: 
+                            fy1 = fy1 + 20 # اگر کادر به سقف تصویر چسبیده بود، متن را داخل کادر بینداز
+
+                        # ۵. چاپ نهایی متن روی تصویر
+                        frame = put_persian_text(frame, display_text, (fx1, fy1-70), color=color, font_size=font_size)
+                        #cv2.putText(frame, label, (fx1, fy1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
                     rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     resized = cv2.resize(rgb_image, (640, 480), interpolation=cv2.INTER_LINEAR)

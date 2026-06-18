@@ -55,7 +55,8 @@ class EditCameraThread(QThread):
             if response.status_code == 200:
                 self.finished_signal.emit(True, "اطلاعات دوربین با موفقیت ویرایش شد.")
             else:
-                self.finished_signal.emit(False, "خطا از سمت سرور: ویرایش انجام نشد.")
+                # 🔴 اضافه شدن response.text برای گزارش دقیق متن ارور از بک‌اند
+                self.finished_signal.emit(False, f"خطا از سمت سرور ({response.status_code}):\n{response.text}")
         except Exception as e:
             self.finished_signal.emit(False, f"خطای ارتباطی:\n{str(e)}")
 
@@ -190,7 +191,6 @@ class EditCameraDialog(QDialog):
         
         self.combo_type = QComboBox()
         self.combo_type.addItems(["وب‌کم (webcam)", "فایل ویدیویی (video)", "تحت شبکه (rtsp)"])
-        # مپ کردن نوع دوربین فعلی برای نمایش درست در کومبوباکس
         type_reverse_map = {"webcam": "وب‌کم (webcam)", "video": "فایل ویدیویی (video)", "rtsp": "تحت شبکه (rtsp)"}
         current_type = type_reverse_map.get(cam_data.get("type", "webcam"))
         self.combo_type.setCurrentText(current_type)
@@ -198,8 +198,17 @@ class EditCameraDialog(QDialog):
         self.input_url = QLineEdit(cam_data.get("rtsp_url", ""))
         self.input_location = QLineEdit(cam_data.get("location", ""))
         
-        # تبدیل آرایه زون به استرینگ
-        zones_array = cam_data.get("zones", [0, 0, 1280, 720])
+        # 🔴 پاکسازی و حل مشکل String شدن Zones توسط دیتابیس
+        import json
+        zones_raw = cam_data.get("zones", [0, 0, 1280, 720])
+        if isinstance(zones_raw, str):
+            try:
+                zones_array = json.loads(zones_raw)
+            except:
+                zones_array = [0, 0, 1280, 720]
+        else:
+            zones_array = zones_raw
+            
         zones_str = ", ".join(map(str, zones_array))
         self.input_zone = QLineEdit(zones_str)
         
@@ -272,7 +281,7 @@ class EditCameraDialog(QDialog):
             self.accept()
         else:
             QMessageBox.critical(self, "خطا", message)
-
+            
 # =================================================================
 # 3. کلاس اصلی صفحه مدیریت دوربین‌ها (UI اصلی)
 # =================================================================

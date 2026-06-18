@@ -112,3 +112,18 @@ def delete_employee_shift(shift_id: int, db: Session = Depends(get_db)):
     db_shift.is_deleted = True # حذف نرم شیفت
     db.commit()
     return {"status": "soft_deleted", "shift_id": shift_id}
+
+@router.put("/shifts/{shift_id}", response_model=EmployeeShiftResponse)
+def update_employee_shift(shift_id: int, data: EmployeeShiftCreate, db: Session = Depends(get_db)):
+    db_shift = db.query(EmployeeShift).filter(EmployeeShift.id == shift_id).first()
+    if not db_shift:
+        raise HTTPException(status_code=404, detail="Shift not found")
+    
+    db_shift.camera_id = data.camera_id
+    db_shift.allowed_days = data.allowed_days
+    db_shift.shift_start = data.shift_start
+    db_shift.shift_end = data.shift_end
+    
+    db.commit()
+    db.refresh(db_shift)
+    return db_shift

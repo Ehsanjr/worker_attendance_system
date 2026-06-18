@@ -309,21 +309,28 @@ class EventsPage(QWidget):
         self.apply_ui_filters()
 
     # =================================================================
-    # اعمال فیلترینگ و رنگ‌بندی
+    # اعمال فیلترینگ، ترشولد دوگانه (حذف نویز) و رنگ‌بندی
     # =================================================================
     def apply_ui_filters(self):
         name_query = self.txt_filter_name.text().strip().lower()
         target_cam_id = self.combo_filter_cam.currentData()
         
-        # گرفتن زمان میلادی از آبجکت‌های شمسی ذخیره شده
-        from_dt = self.j_from_dt.togregorian()
-        to_dt = self.j_to_dt.togregorian()
+        # تبدیل زمان شمسی به میلادی برای مقایسه
+        try:
+            from_dt = self.j_from_dt.togregorian()
+            to_dt = self.j_to_dt.togregorian()
+        except:
+            from_dt = datetime.min
+            to_dt = datetime.max
 
         self.table.setRowCount(0)
         row_idx = 0
-        THRESHOLD_MINUTES = 15 
+        
+        IGNORE_THRESHOLD_MINUTES = 2  # ترشولد حذف نویز (زیر ۲ دقیقه کلا حذف می‌شود)
+        DANGER_THRESHOLD_MINUTES = 15 # ترشولد خطر (بالای ۱۵ دقیقه قرمز می‌شود)
 
         for abs_rec in self.all_absences:
+            # ۱. فیلترهای جستجوی کاربر (نام، دوربین، تاریخ)
             if name_query and name_query not in abs_rec["worker_name"].lower():
                 continue
             if target_cam_id is not None and abs_rec["camera_id"] != target_cam_id:
@@ -331,6 +338,19 @@ class EventsPage(QWidget):
             if not (from_dt <= abs_rec["start_dt"] <= to_dt):
                 continue
 
+            # ۲. 🔴 منطق ترشولد ۲ دقیقه‌ای (فیلتر نویزها)
+            if abs_rec["end_dt"] is not None:
+                # غیبت تمام شده است -> محاسبه زمان رفت و برگشت
+                delta = abs_rec["end_dt"] - abs_rec["start_dt"]
+                if delta.total_seconds() < (IGNORE_THRESHOLD_MINUTES * 60):
+                    continue # غیبت زیر ۲ دقیقه کلا در جدول رسم نمی‌شود (رد شدن از حلقه)
+            else:
+                # کارگر همچنان غایب است -> تا ۲ دقیقه اول او را نشان نده تا داشبورد چشمک نزند
+                live_delta = datetime.now() - abs_rec["start_dt"]
+                if live_delta.total_seconds() < (IGNORE_THRESHOLD_MINUTES * 60):
+                    continue 
+
+            # اگر از فیلترها رد شد (یعنی غیبت بالای ۲ دقیقه است)، سطر را ایجاد کن
             self.table.insertRow(row_idx)
 
             start_shamsi = self.to_shamsi(abs_rec["start_dt"])
@@ -345,17 +365,22 @@ class EventsPage(QWidget):
             end_item = QTableWidgetItem(end_shamsi)
             dur_item = QTableWidgetItem(duration_text)
 
+            # ۳. 🔴 رنگ‌بندی بر اساس ترشولد ۱۵ دقیقه‌ای
             if abs_rec["end_dt"] is None:
+                # حالت اول: همچنان غایب (بیش از ۲ دقیقه)
                 end_item.setForeground(QBrush(QColor("#e74c3c")))
                 end_item.setFont(QFont("Tahoma", -1, QFont.Bold))
                 dur_item.setForeground(QBrush(QColor("#e74c3c")))
                 dur_item.setFont(QFont("Tahoma", -1, QFont.Bold))
             else:
                 delta = abs_rec["end_dt"] - abs_rec["start_dt"]
-                if delta.total_seconds() <= (THRESHOLD_MINUTES * 60):
+                # چون زیر ۲ دقیقه را بالا فیلتر کردیم، اینجا قطعاً زمان بالای ۲ دقیقه است
+                if delta.total_seconds() <= (DANGER_THRESHOLD_MINUTES * 60):
+                    # حالت دوم: بین ۲ تا ۱۵ دقیقه -> سبز
                     dur_item.setForeground(QBrush(QColor("#2ecc71")))
                     dur_item.setFont(QFont("Tahoma", -1, QFont.Bold))
                 else:
+                    # حالت سوم: بیشتر از ۱۵ دقیقه -> قرمز
                     dur_item.setForeground(QBrush(QColor("#e74c3c")))
                     dur_item.setFont(QFont("Tahoma", -1, QFont.Bold))
 

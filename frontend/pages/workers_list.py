@@ -54,13 +54,120 @@ class EditWorkerTextThread(QThread):
             self.finished_signal.emit(False, str(e))
 
 # =================================================================
-# 2. پنل مستقل مدیریت شیفت‌ها (اصلاح شده با منوی کشویی زمان)
+# پاپ‌آپ ویرایش یک شیفت خاص (کلاس جدید)
+# =================================================================
+class EditShiftDialog(QDialog):
+    def __init__(self, shift_data, cam_map, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ویرایش شیفت")
+        self.setFixedWidth(400)
+        self.setLayoutDirection(Qt.RightToLeft)
+        
+        self.shift_data = shift_data
+        self.cam_map = cam_map
+
+        layout = QFormLayout(self)
+
+        self.combo_camera = QComboBox()
+        self.combo_camera.addItem("همه دوربین‌ها", None)
+        for c_id, c_name in self.cam_map.items():
+            self.combo_camera.addItem(c_name, c_id)
+
+        saved_cam_id = shift_data.get("camera_id")
+        if saved_cam_id is not None:
+            idx = self.combo_camera.findData(saved_cam_id)
+            if idx >= 0: self.combo_camera.setCurrentIndex(idx)
+            
+        layout.addRow("دوربین:", self.combo_camera)
+
+        saved_days = shift_data.get("allowed_days", "").split(",")
+        self.days_checkboxes = {}
+        days_mapping = [(5, "شنبه"), (6, "یک‌شنبه"), (0, "دوشنبه"), (1, "سه‌شنبه"), (2, "چهارشنبه"), (3, "پنج‌شنبه"), (4, "جمعه")]
+        days_layout = QGridLayout()
+        row, col = 0, 0
+        for day_val, day_name in days_mapping:
+            chk = QCheckBox(day_name)
+            if str(day_val) in saved_days:
+                chk.setChecked(True)
+            self.days_checkboxes[day_val] = chk
+            days_layout.addWidget(chk, row, col)
+            col += 1
+            if col > 3: col = 0; row += 1
+        layout.addRow("روزها:", days_layout)
+
+        time_layout = QHBoxLayout()
+        self.start_h_cb = QComboBox()
+        self.start_h_cb.addItems([f"{h:02d}" for h in range(24)])
+        self.start_m_cb = QComboBox()
+        self.start_m_cb.addItems([f"{m:02d}" for m in range(60)])
+        
+        s_h, s_m = shift_data.get("shift_start", "08:00").split(":")
+        self.start_h_cb.setCurrentText(s_h)
+        self.start_m_cb.setCurrentText(s_m)
+
+        self.end_h_cb = QComboBox()
+        self.end_h_cb.addItems([f"{h:02d}" for h in range(24)])
+        self.end_m_cb = QComboBox()
+        self.end_m_cb.addItems([f"{m:02d}" for m in range(60)])
+
+        e_h, e_m = shift_data.get("shift_end", "17:00").split(":")
+        self.end_h_cb.setCurrentText(e_h)
+        self.end_m_cb.setCurrentText(e_m)
+
+        time_layout.addWidget(QLabel("از:"))
+        time_layout.addWidget(self.start_h_cb)
+        time_layout.addWidget(QLabel(":"))
+        time_layout.addWidget(self.start_m_cb)
+        time_layout.addSpacing(15)
+        time_layout.addWidget(QLabel("تا:"))
+        time_layout.addWidget(self.end_h_cb)
+        time_layout.addWidget(QLabel(":"))
+        time_layout.addWidget(self.end_m_cb)
+        
+        layout.addRow("ساعت:", time_layout)
+
+        btn_layout = QHBoxLayout()
+        save_btn = QPushButton("💾 ذخیره تغییرات شیفت")
+        save_btn.setStyleSheet("background-color: #2ecc71; color: white; padding: 6px; font-weight: bold;")
+        save_btn.clicked.connect(self.submit)
+        
+        cancel_btn = QPushButton("انصراف")
+        cancel_btn.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addRow(btn_layout)
+
+    def submit(self):
+        selected_days = [str(val) for val, chk in self.days_checkboxes.items() if chk.isChecked()]
+        if not selected_days:
+            QMessageBox.warning(self, "خطا", "لطفاً حداقل یک روز را انتخاب کنید.")
+            return
+
+        payload = {
+            "camera_id": self.combo_camera.currentData(),
+            "allowed_days": ",".join(selected_days),
+            "shift_start": f"{self.start_h_cb.currentText()}:{self.start_m_cb.currentText()}",
+            "shift_end": f"{self.end_h_cb.currentText()}:{self.end_m_cb.currentText()}"
+        }
+        
+        try:
+            res = requests.put(f"http://localhost:8000/employees/shifts/{self.shift_data['id']}", json=payload)
+            if res.status_code == 200:
+                self.accept()
+            else:
+                QMessageBox.critical(self, "خطا", f"خطای سرور: {res.text}")
+        except Exception as e:
+            QMessageBox.critical(self, "خطا", str(e))
+
+# =================================================================
+# پنل مستقل مدیریت شیفت‌ها (آپدیت شده)
 # =================================================================
 class ManageShiftsDialog(QDialog):
     def __init__(self, worker_id, worker_name, cam_map, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"مدیریت شیفت‌ها - {worker_name}")
-        self.setFixedSize(500, 420)
+        self.setFixedSize(550, 500) # کمی بزرگتر شد تا جدول بهتر جا شود
         self.setLayoutDirection(Qt.RightToLeft)
         
         self.worker_id = worker_id
@@ -73,6 +180,12 @@ class ManageShiftsDialog(QDialog):
         self.table.setHorizontalHeaderLabels(["دوربین", "روزها", "ساعت", "عملیات"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.table)
+
+        # 🔴 لیبل راهنمای اضافه شده
+        add_title = QLabel("--- ✨ افزودن شیفت جدید ✨ ---")
+        add_title.setStyleSheet("font-weight: bold; color: #2c3e50; font-size: 14px; margin-top: 10px;")
+        add_title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(add_title)
 
         add_group = QFormLayout()
         
@@ -94,9 +207,7 @@ class ManageShiftsDialog(QDialog):
             if col > 3: col = 0; row += 1
         add_group.addRow("روزها:", days_layout)
 
-        # 🔴 سیستم جدید انتخاب ساعت (Drop-down)
         time_layout = QHBoxLayout()
-        
         self.start_h_cb = QComboBox()
         self.start_h_cb.addItems([f"{h:02d}" for h in range(24)])
         self.start_h_cb.setCurrentText("08")
@@ -126,7 +237,7 @@ class ManageShiftsDialog(QDialog):
         add_group.addRow("ساعت:", time_layout)
 
         btn_add = QPushButton("➕ ثبت شیفت جدید در دیتابیس")
-        btn_add.setStyleSheet("background-color: #8e44ad; color: white; padding: 6px; font-weight: bold;")
+        btn_add.setStyleSheet("background-color: #8e44ad; color: white; padding: 8px; font-weight: bold;")
         btn_add.clicked.connect(self.add_new_shift)
         add_group.addRow(btn_add)
         
@@ -160,14 +271,32 @@ class ManageShiftsDialog(QDialog):
             time_item = QTableWidgetItem(f"{shift.get('shift_start')} تا {shift.get('shift_end')}")
             time_item.setTextAlignment(Qt.AlignCenter)
             
+            # 🔴 دکمه‌های عملیات (اضافه شدن دکمه ویرایش)
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout(actions_widget)
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            actions_layout.setSpacing(5)
+
+            edit_btn = QPushButton("ویرایش ✏️")
+            edit_btn.setStyleSheet("background-color: #f39c12; color: white; padding: 4px; font-size: 11px;")
+            edit_btn.clicked.connect(lambda _, s=shift: self.open_edit_shift(s))
+
             del_btn = QPushButton("حذف 🗑")
-            del_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+            del_btn.setStyleSheet("background-color: #e74c3c; color: white; padding: 4px; font-size: 11px;")
             del_btn.clicked.connect(lambda _, s_id=shift["id"]: self.delete_shift(s_id))
 
+            actions_layout.addWidget(edit_btn)
+            actions_layout.addWidget(del_btn)
+            
             self.table.setItem(idx, 0, cam_item)
             self.table.setItem(idx, 1, days_item)
             self.table.setItem(idx, 2, time_item)
-            self.table.setCellWidget(idx, 3, del_btn)
+            self.table.setCellWidget(idx, 3, actions_widget)
+
+    def open_edit_shift(self, shift_data):
+        dialog = EditShiftDialog(shift_data, self.cam_map, self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.load_shifts() # رفرش اتوماتیک لیست شیفت‌ها پس از ویرایش
 
     def add_new_shift(self):
         selected_days = [str(val) for val, chk in self.days_checkboxes.items() if chk.isChecked()]
@@ -175,14 +304,11 @@ class ManageShiftsDialog(QDialog):
             QMessageBox.warning(self, "خطا", "لطفاً حداقل یک روز را انتخاب کنید.")
             return
 
-        start_time_str = f"{self.start_h_cb.currentText()}:{self.start_m_cb.currentText()}"
-        end_time_str = f"{self.end_h_cb.currentText()}:{self.end_m_cb.currentText()}"
-
         payload = {
             "camera_id": self.combo_camera.currentData(),
             "allowed_days": ",".join(selected_days),
-            "shift_start": start_time_str,
-            "shift_end": end_time_str
+            "shift_start": f"{self.start_h_cb.currentText()}:{self.start_m_cb.currentText()}",
+            "shift_end": f"{self.end_h_cb.currentText()}:{self.end_m_cb.currentText()}"
         }
         try:
             res = requests.post(f"http://localhost:8000/employees/{self.worker_id}/shifts", json=payload)
