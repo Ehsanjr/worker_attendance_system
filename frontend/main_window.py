@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QStackedWidget, QLabel
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QSettings # 🔴 اضافه شدن QSettings برای بارگذاری داینامیک کلمات سایدبار
 import os
 
 # ایمپورت صفحات ساخته شده
@@ -9,12 +9,18 @@ from pages.workers_list import WorkersListPage
 from pages.events import EventsPage
 from pages.add_worker import AddWorkerPage
 from pages.cameras import CamerasPage
+from pages.settings import SettingsPage
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("سیستم هوشمند حضور و غیاب")
         self.resize(1100, 700)
+        
+        # 🔴 لود واژگان سفارشی کاربر از حافظه پایدار سیستم
+        self.settings = QSettings("SmartVision", "AttendanceSystem")
+        self.t_single = self.settings.value("term_singular", "کارگر")
+        self.t_plural = self.settings.value("term_plural", "کارگران")
         
         # ویجت مرکزی و لایوت اصلی افقی
         central_widget = QWidget()
@@ -40,8 +46,8 @@ class MainWindow(QMainWindow):
         self.btn_live = QPushButton("داشبورد زنده")
         self.btn_live.setObjectName("MenuButton")
 
-        # --- منوی کشویی کارگران ---
-        self.btn_workers_parent = QPushButton("کارگران ▼")
+        # --- 🔴 اصلاح منوی کشویی (داینامیک بر اساس کلمه جمع جدید) ---
+        self.btn_workers_parent = QPushButton(f"{self.t_plural} ▼")
         self.btn_workers_parent.setObjectName("ParentMenuButton")
         self.btn_workers_parent.clicked.connect(self.toggle_workers_menu)
 
@@ -52,9 +58,10 @@ class MainWindow(QMainWindow):
         sub_layout.setContentsMargins(15, 0, 0, 0) # کمی جلوتر آمدن زیرمنوها نسبت به منوی اصلی
         sub_layout.setSpacing(5)
 
-        self.btn_workers_list = QPushButton("• لیست کارگران")
+        # 🔴 اعمال کلمات مفرد و جمع سفارشی در دکمه‌های زیرمنو
+        self.btn_workers_list = QPushButton(f"• لیست {self.t_plural}")
         self.btn_workers_list.setObjectName("SubMenuButton")
-        self.btn_add_worker = QPushButton("• افزودن کارگر")
+        self.btn_add_worker = QPushButton(f"• افزودن {self.t_single}")
         self.btn_add_worker.setObjectName("SubMenuButton")
 
         sub_layout.addWidget(self.btn_workers_list)
@@ -94,7 +101,7 @@ class MainWindow(QMainWindow):
         self.page_add_worker = AddWorkerPage()
         self.page_events = EventsPage()
         self.page_cameras = CamerasPage()
-        self.page_settings = self.create_dummy_page("صفحه تنظیمات")
+        self.page_settings = SettingsPage()
 
         # اضافه کردن صفحات به کانتینر مرکزی با ایندکس مشخص
         self.page_container.addWidget(self.page_overview)      # Index 0
@@ -123,15 +130,15 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.page_container, stretch=1)
 
     def toggle_workers_menu(self):
-        """تابع باز و بسته کردن منوی کشویی کارگران"""
+        """تابع باز و بسته کردن منوی کشویی (اصلاح شده با کلمات سفارشی)"""
         is_visible = self.workers_sub_container.isVisible()
         self.workers_sub_container.setVisible(not is_visible)
         
-        # تغییر فلش دکمه برای زیبایی بصری
+        # 🔴 اصلاح وضعیت باز و بسته شدن فلش منو با حفظ کلمه کلیدی جمع سفارشی
         if is_visible:
-            self.btn_workers_parent.setText("کارگران ▼")
+            self.btn_workers_parent.setText(f"{self.t_plural} ▼")
         else:
-            self.btn_workers_parent.setText("کارگران ▲")
+            self.btn_workers_parent.setText(f"{self.t_plural} ▲")
 
     def create_dummy_page(self, text):
         widget = QWidget()

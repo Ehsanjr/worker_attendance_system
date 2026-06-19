@@ -1,12 +1,11 @@
 import requests
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings # 🔴 QSettings اضافه شد
 
 # =======================================================
 # کلاس پردازش پس‌زمینه برای دریافت اطلاعات از بک‌اند
 # =======================================================
 class DashboardDataThread(QThread):
-    # تعریف سیگنال‌ها برای ارسال دیتای موفق یا پیام خطا به رابط کاربری
     data_ready = pyqtSignal(dict)
     error_occurred = pyqtSignal(str)
 
@@ -15,7 +14,6 @@ class DashboardDataThread(QThread):
             base_url = "http://localhost:8000"
             
             # ۱. دریافت کل کارگران
-            # فرض بر این است که روت شما چیزی شبیه به این است
             emp_response = requests.get(f"{base_url}/employees/")
             emp_response.raise_for_status()
             employees = emp_response.json()
@@ -25,25 +23,19 @@ class DashboardDataThread(QThread):
             cam_response = requests.get(f"{base_url}/cameras/")
             cam_response.raise_for_status()
             cameras = cam_response.json()
-            # اگر فیلد is_active دارید، می‌توانید اینجا فیلتر کنید، در غیر این صورت طول کل را می‌گیریم
             active_cameras = len([c for c in cameras if c.get("is_active", True)])
 
-            # ۳. محاسبه کارگران غایب
-            # این بخش بستگی به ساختار دقیق روتر attendance شما دارد.
-            # فرض می‌کنیم روتر رخدادهای امروز را برمی‌گرداند.
+            # ۳. محاسبه غایبین
             try:
-                att_response = requests.get(f"{base_url}/attendance/") # آدرس دقیق روت تردد را اینجا قرار دهید
+                att_response = requests.get(f"{base_url}/attendance/") 
                 if att_response.status_code == 200:
                     attendance_events = att_response.json()
-                    # استخراج آیدی‌های یکتای کارگرانی که امروز حضور داشته‌اند
-                    present_worker_ids = set([event.get("employee_id") for event in attendance_events])
                     absent_workers = len([aw for aw in attendance_events if aw.get("event_type") == "absent"])
                 else:
                     absent_workers = 0
             except:
-                absent_workers = 0 # اگر هنوز روت تردد کامل نشده، موقتا صفر می‌گذاریم
+                absent_workers = 0 
 
-            # ارسال داده‌ها به رابط کاربری
             self.data_ready.emit({
                 "total_workers": str(total_workers),
                 "active_cameras": str(active_cameras),
@@ -61,6 +53,11 @@ class DashboardDataThread(QThread):
 class OverviewPage(QWidget):
     def __init__(self):
         super().__init__()
+        
+        # 🔴 استخراج کلمه جمع سفارشی از حافظه سیستم
+        self.settings = QSettings("SmartVision", "AttendanceSystem")
+        self.t_plural = self.settings.value("term_plural", "کارگران")
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(20)
@@ -69,9 +66,9 @@ class OverviewPage(QWidget):
         top_layout = QHBoxLayout()
         top_layout.setSpacing(20)
 
-        # مقدار اولیه را "در حال لودینگ" می‌گذاریم تا به محض اجرای برنامه کاربر متوجه پروسه شود
-        self.box_total_workers = self.create_stat_card("تعداد کل کارگران", "...")
-        self.box_absent_workers = self.create_stat_card("کارگران غایب", "...")
+        # 🔴 استفاده از متغیرهای داینامیک در تیتر باکس‌ها
+        self.box_total_workers = self.create_stat_card(f"تعداد کل {self.t_plural}", "...")
+        self.box_absent_workers = self.create_stat_card(f"{self.t_plural} غایب", "...")
         self.box_active_cameras = self.create_stat_card("دوربین‌های فعال", "...")
 
         top_layout.addWidget(self.box_total_workers)
@@ -91,7 +88,6 @@ class OverviewPage(QWidget):
         layout.addLayout(top_layout, stretch=1)
         layout.addLayout(bottom_layout, stretch=3)
 
-        # شروع فرآیند دریافت اطلاعات از بک‌اند به محض لود شدن صفحه
         self.fetch_data_from_backend()
 
     def create_stat_card(self, title, initial_value):
@@ -125,21 +121,17 @@ class OverviewPage(QWidget):
 
     # --- متدهای مربوط به اتصال بک‌اند ---
     def fetch_data_from_backend(self):
-        # ساخت و استارت Thread
         self.api_thread = DashboardDataThread()
-        # متصل کردن سیگنال‌ها به توابع آپدیت رابط کاربری
         self.api_thread.data_ready.connect(self.update_stat_boxes)
         self.api_thread.error_occurred.connect(self.show_error)
         self.api_thread.start()
 
     def update_stat_boxes(self, data):
-        # این تابع زمانی اجرا می‌شود که دیتای تمیز و آماده از Thread برسد
         self.box_total_workers.findChild(QLabel, "CardValue").setText(data["total_workers"])
         self.box_active_cameras.findChild(QLabel, "CardValue").setText(data["active_cameras"])
         self.box_absent_workers.findChild(QLabel, "CardValue").setText(data["absent_workers"])
 
     def show_error(self, error_msg):
-        # نمایش پیغام خطا در باکس‌ها (مثلا اگر FastAPI خاموش باشد)
         self.box_total_workers.findChild(QLabel, "CardValue").setText("خطا")
         self.box_total_workers.findChild(QLabel, "CardValue").setStyleSheet("color: #e74c3c; font-size: 20px;")
         
@@ -148,5 +140,3 @@ class OverviewPage(QWidget):
         
         self.box_absent_workers.findChild(QLabel, "CardValue").setText("خطا")
         self.box_absent_workers.findChild(QLabel, "CardValue").setStyleSheet("color: #e74c3c; font-size: 20px;")
-        
-        print(f"Backend Connection Error: {error_msg}")

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from typing import List
-
+from schemas.employee import FaceEmbeddingResponse
 from database import get_db
 from models.employee import Employee, EmployeeShift
 from models.face_embedding import FaceEmbedding
@@ -127,3 +127,20 @@ def update_employee_shift(shift_id: int, data: EmployeeShiftCreate, db: Session 
     db.commit()
     db.refresh(db_shift)
     return db_shift
+
+# دریافت تمام چهره‌ها (Embeddings) یک کارگر
+@router.get("/{employee_id}/embeddings", response_model=List[FaceEmbeddingResponse])
+def get_employee_embeddings(employee_id: int, db: Session = Depends(get_db)):
+    embeddings = db.query(FaceEmbedding).filter(FaceEmbedding.employee_id == employee_id).all()
+    return embeddings
+
+# حذف یک چهره خاص از دیتابیس
+@router.delete("/embeddings/{embedding_id}")
+def delete_face_embedding(embedding_id: int, db: Session = Depends(get_db)):
+    db_emb = db.query(FaceEmbedding).filter(FaceEmbedding.id == embedding_id).first()
+    if not db_emb:
+        raise HTTPException(status_code=404, detail="Embedding not found")
+    
+    db.delete(db_emb)
+    db.commit()
+    return {"status": "success", "deleted_id": embedding_id}

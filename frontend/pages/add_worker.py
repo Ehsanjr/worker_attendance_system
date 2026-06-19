@@ -9,20 +9,52 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
                              QLineEdit, QPushButton, QLabel, QFileDialog, QMessageBox,
                              QComboBox, QCheckBox, QGridLayout, QGroupBox,
                              QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea, QDialog)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+# 🔴 اضافه شدن QSettings برای بومی‌سازی عناوین متنی صفحه تعریف کارگر جدید
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings
 from PyQt5.QtGui import QPixmap
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 WORKERS_DIR = BASE_DIR / "data" / "workers"
 
-# -----------------------------------------------------------------
-# 1. کلاس ویجت تصویر بندانگشتی (Thumbnail)
-# -----------------------------------------------------------------
+def validate_shift_logic(new_shift, existing_shifts, exclude_index=None, cam_map=None):
+    warnings = []
+    if new_shift["shift_start"] == new_shift["shift_end"]:
+        warnings.append("ساعت شروع و پایان یکسان است (شیفت ۰ دقیقه‌ای ایجاد کرده‌اید!).")
+
+    def t2m(t_str):
+        h, m = map(int, t_str.split(":"))
+        return h * 60 + m
+
+    new_days = set(new_shift["allowed_days"].split(","))
+    ns, ne = t2m(new_shift["shift_start"]), t2m(new_shift["shift_end"])
+    new_intervals = [(ns, ne)] if ns <= ne else [(ns, 24*60), (0, ne)]
+
+    for idx, shift in enumerate(existing_shifts):
+        if exclude_index is not None and idx == exclude_index: continue
+        exist_days = set(shift["allowed_days"].split(","))
+        common_days = new_days.intersection(exist_days)
+        if not common_days: continue
+            
+        es, ee = t2m(shift["shift_start"]), t2m(shift["shift_end"])
+        exist_intervals = [(es, ee)] if es <= ee else [(es, 24*60), (0, ee)]
+        
+        overlap = False
+        for n_start, n_end in new_intervals:
+            for e_start, e_end in exist_intervals:
+                if max(n_start, e_start) < min(n_end, e_end):
+                    overlap = True
+                    break
+            if overlap: break
+            
+        if overlap:
+            c_name = shift.get("camera_name", "همان دوربین/نامشخص")
+            warnings.append(f"تداخل زمانی در روزهای مشترک با شیفت ({shift['shift_start']} تا {shift['shift_end']} - {c_name}).")
+    return warnings
+
 class ThumbnailWidget(QWidget):
     def __init__(self, img_path, remove_callback, parent=None):
         super().__init__(parent)
         self.img_path = img_path
-        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(2)
@@ -38,31 +70,25 @@ class ThumbnailWidget(QWidget):
         self.del_btn = QPushButton("حذف ❌")
         self.del_btn.setStyleSheet("background-color: #e74c3c; color: white; font-size: 10px; padding: 2px;")
         self.del_btn.clicked.connect(lambda: remove_callback(self.img_path, self))
-
         layout.addWidget(self.img_label)
         layout.addWidget(self.del_btn)
 
-# -----------------------------------------------------------------
-# 2. پاپ‌آپ افزودن شیفت موقت (اصلاح شده با منوی کشویی کاربرپسند)
-# -----------------------------------------------------------------
 class AddShiftDialog(QDialog):
-    def __init__(self, cam_map, parent=None):
+    def __init__(self, cam_map, existing_shifts, parent=None):
         super().__init__(parent)
         self.setWindowTitle("تعریف شیفت و دوربین جدید")
         self.setFixedWidth(400)
         self.setLayoutDirection(Qt.RightToLeft)
         self.shift_data = None
+        self.existing_shifts = existing_shifts
+        self.cam_map = cam_map
         
         layout = QFormLayout(self)
-        
-        # دوربین
         self.combo_camera = QComboBox()
         self.combo_camera.addItem("همه دوربین‌ها", None)
-        for c_id, c_name in cam_map.items():
-            self.combo_camera.addItem(c_name, c_id)
+        for c_id, c_name in cam_map.items(): self.combo_camera.addItem(c_name, c_id)
         layout.addRow("دوربین مجاز:", self.combo_camera)
 
-        # روزها
         self.days_checkboxes = {}
         days_mapping = [(5, "شنبه"), (6, "یک‌شنبه"), (0, "دوشنبه"), (1, "سه‌شنبه"), (2, "چهارشنبه"), (3, "پنج‌شنبه"), (4, "جمعه")]
         days_layout = QGridLayout()
@@ -76,23 +102,17 @@ class AddShiftDialog(QDialog):
             if col > 3: col = 0; row += 1
         layout.addRow("روزهای مجاز:", days_layout)
 
-        # 🔴 سیستم جدید انتخاب ساعت (Drop-down)
         time_layout = QHBoxLayout()
-        
-        # ساعت شروع
         self.start_h_cb = QComboBox()
         self.start_h_cb.addItems([f"{h:02d}" for h in range(24)])
-        self.start_h_cb.setCurrentText("08") # پیش‌فرض ۸ صبح
-        
+        self.start_h_cb.setCurrentText("08") 
         self.start_m_cb = QComboBox()
         self.start_m_cb.addItems([f"{m:02d}" for m in range(60)])
         self.start_m_cb.setCurrentText("00")
 
-        # ساعت پایان
         self.end_h_cb = QComboBox()
         self.end_h_cb.addItems([f"{h:02d}" for h in range(24)])
-        self.end_h_cb.setCurrentText("17") # پیش‌فرض ۵ عصر
-        
+        self.end_h_cb.setCurrentText("17") 
         self.end_m_cb = QComboBox()
         self.end_m_cb.addItems([f"{m:02d}" for m in range(60)])
         self.end_m_cb.setCurrentText("00")
@@ -106,15 +126,16 @@ class AddShiftDialog(QDialog):
         time_layout.addWidget(self.end_h_cb)
         time_layout.addWidget(QLabel(":"))
         time_layout.addWidget(self.end_m_cb)
-        
         layout.addRow("ساعت شیفت:", time_layout)
 
-        # دکمه‌ها
         btn_layout = QHBoxLayout()
         save_btn = QPushButton("تایید و افزودن به لیست")
         save_btn.setStyleSheet("background-color: #3498db; color: white; padding: 6px; font-weight: bold;")
         save_btn.clicked.connect(self.submit)
+        cancel_btn = QPushButton("انصراف")
+        cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(cancel_btn)
         layout.addRow(btn_layout)
 
     def submit(self):
@@ -122,34 +143,128 @@ class AddShiftDialog(QDialog):
         if not selected_days:
             QMessageBox.warning(self, "خطا", "حداقل یک روز کاری باید انتخاب شود.")
             return
-
-        start_time_str = f"{self.start_h_cb.currentText()}:{self.start_m_cb.currentText()}"
-        end_time_str = f"{self.end_h_cb.currentText()}:{self.end_m_cb.currentText()}"
-
-        self.shift_data = {
+        shift_data = {
             "camera_id": self.combo_camera.currentData(),
             "camera_name": self.combo_camera.currentText(),
             "allowed_days": ",".join(selected_days),
-            "shift_start": start_time_str,
-            "shift_end": end_time_str
+            "shift_start": f"{self.start_h_cb.currentText()}:{self.start_m_cb.currentText()}",
+            "shift_end": f"{self.end_h_cb.currentText()}:{self.end_m_cb.currentText()}"
         }
+        warnings = validate_shift_logic(shift_data, self.existing_shifts, cam_map=self.cam_map)
+        if warnings:
+            msg = "⚠️ هشدارهای منطقی زیر یافت شد:\n\n" + "\n".join([f"❌ {w}" for w in warnings]) + "\n\nآیا با این حال می‌خواهید این شیفت را اضافه کنید؟"
+            reply = QMessageBox.warning(self, "تداخل یافت شد", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.No: return
+        self.shift_data = shift_data
         self.accept()
 
-# -----------------------------------------------------------------
-# 3. Thread ثبت‌نام نهایی 
-# -----------------------------------------------------------------
+class EditTempShiftDialog(QDialog):
+    def __init__(self, shift_data, shift_index, cam_map, existing_shifts, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ویرایش شیفت انتخاب شده")
+        self.setFixedWidth(400)
+        self.setLayoutDirection(Qt.RightToLeft)
+        self.shift_data = shift_data
+        self.shift_index = shift_index
+        self.existing_shifts = existing_shifts
+        self.cam_map = cam_map
+        
+        layout = QFormLayout(self)
+        self.combo_camera = QComboBox()
+        self.combo_camera.addItem("همه دوربین‌ها", None)
+        for c_id, c_name in cam_map.items(): self.combo_camera.addItem(c_name, c_id)
+        saved_cam_id = shift_data.get("camera_id")
+        if saved_cam_id is not None:
+            idx = self.combo_camera.findData(saved_cam_id)
+            if idx >= 0: self.combo_camera.setCurrentIndex(idx)
+        layout.addRow("دوربین مجاز:", self.combo_camera)
+
+        saved_days = shift_data.get("allowed_days", "").split(",")
+        self.days_checkboxes = {}
+        days_mapping = [(5, "شنبه"), (6, "یک‌شنبه"), (0, "دوشنبه"), (1, "سه‌شنبه"), (2, "چهارشنبه"), (3, "پنج‌شنبه"), (4, "جمعه")]
+        days_layout = QGridLayout()
+        row, col = 0, 0
+        for day_val, day_name in days_mapping:
+            chk = QCheckBox(day_name)
+            if str(day_val) in saved_days: chk.setChecked(True)
+            self.days_checkboxes[day_val] = chk
+            days_layout.addWidget(chk, row, col)
+            col += 1
+            if col > 3: col = 0; row += 1
+        layout.addRow("روزهای مجاز:", days_layout)
+
+        time_layout = QHBoxLayout()
+        self.start_h_cb = QComboBox()
+        self.start_h_cb.addItems([f"{h:02d}" for h in range(24)])
+        self.start_m_cb = QComboBox()
+        self.start_m_cb.addItems([f"{m:02d}" for m in range(60)])
+        s_h, s_m = shift_data.get("shift_start", "08:00").split(":")
+        self.start_h_cb.setCurrentText(s_h)
+        self.start_m_cb.setCurrentText(s_m)
+
+        self.end_h_cb = QComboBox()
+        self.end_h_cb.addItems([f"{h:02d}" for h in range(24)])
+        self.end_m_cb = QComboBox()
+        self.end_m_cb.addItems([f"{m:02d}" for m in range(60)])
+        e_h, e_m = shift_data.get("shift_end", "17:00").split(":")
+        self.end_h_cb.setCurrentText(e_h)
+        self.end_m_cb.setCurrentText(e_m)
+
+        time_layout.addWidget(QLabel("از:"))
+        time_layout.addWidget(self.start_h_cb)
+        time_layout.addWidget(QLabel(":"))
+        time_layout.addWidget(self.start_m_cb)
+        time_layout.addSpacing(15)
+        time_layout.addWidget(QLabel("تا:"))
+        time_layout.addWidget(self.end_h_cb)
+        time_layout.addWidget(QLabel(":"))
+        time_layout.addWidget(self.end_m_cb)
+        layout.addRow("ساعت شیفت:", time_layout)
+
+        btn_layout = QHBoxLayout()
+        save_btn = QPushButton("💾 ذخیره تغییرات شیفت")
+        save_btn.setStyleSheet("background-color: #2ecc71; color: white; padding: 6px; font-weight: bold;")
+        save_btn.clicked.connect(self.submit)
+        cancel_btn = QPushButton("انصراف")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addRow(btn_layout)
+
+    def submit(self):
+        selected_days = [str(val) for val, chk in self.days_checkboxes.items() if chk.isChecked()]
+        if not selected_days:
+            QMessageBox.warning(self, "خطا", "حداقل یک روز کاری باید انتخاب شود.")
+            return
+        shift_data = {
+            "camera_id": self.combo_camera.currentData(),
+            "camera_name": self.combo_camera.currentText(),
+            "allowed_days": ",".join(selected_days),
+            "shift_start": f"{self.start_h_cb.currentText()}:{self.start_m_cb.currentText()}",
+            "shift_end": f"{self.end_h_cb.currentText()}:{self.end_m_cb.currentText()}"
+        }
+        warnings = validate_shift_logic(shift_data, self.existing_shifts, exclude_index=self.shift_index, cam_map=self.cam_map)
+        if warnings:
+            msg = "⚠️ هشدارهای منطقی زیر یافت شد:\n\n" + "\n".join([f"❌ {w}" for w in warnings]) + "\n\nآیا با این حال می‌خواهید این ویرایش را ذخیره کنید؟"
+            reply = QMessageBox.warning(self, "تداخل یافت شد", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.No: return
+        self.shift_data = shift_data
+        self.accept()
+
 class AddWorkerThread(QThread):
     finished_signal = pyqtSignal(bool, str)
     progress_signal = pyqtSignal(str)
 
-    def __init__(self, payload, photo_paths):
+    def __init__(self, payload, photo_paths, t_single, t_plural):
         super().__init__()
         self.payload = payload
         self.photo_paths = photo_paths
+        self.t_single = t_single
+        self.t_plural = t_plural
 
     def run(self):
         try:
-            self.progress_signal.emit("در حال ثبت اطلاعات متنی و شیفت‌ها...")
+            self.progress_signal.emit(f"در حال ثبت اطلاعات متنی و شیفت‌های {self.t_single}...")
             response = requests.post("http://localhost:8000/employees/", json=self.payload)
             if response.status_code != 200:
                 self.finished_signal.emit(False, "خطا: سرور بک‌اند اطلاعات را قبول نکرد.")
@@ -157,7 +272,6 @@ class AddWorkerThread(QThread):
 
             worker_id = response.json().get("id")
             folder_name = self.payload["name"].replace(" ", "_")
-
             worker_folder = WORKERS_DIR / folder_name
             worker_folder.mkdir(parents=True, exist_ok=True)
 
@@ -181,14 +295,10 @@ class AddWorkerThread(QThread):
                 emb_res = requests.post(f"http://localhost:8000/employees/{worker_id}/embeddings", json=emb_payload)
                 if emb_res.status_code == 200: successful_embeddings += 1
 
-            self.finished_signal.emit(True, f"کارگر با موفقیت ثبت شد!\n{len(self.payload['shifts'])} شیفت و {successful_embeddings} چهره ذخیره گردید.")
-
+            self.finished_signal.emit(True, f"{self.t_single} با موفقیت ثبت شد!\n{len(self.payload['shifts'])} شیفت و {successful_embeddings} چهره ذخیره گردید.")
         except Exception as e:
             self.finished_signal.emit(False, f"خطای غیرمنتظره:\n{str(e)}")
 
-# -----------------------------------------------------------------
-# 4. صفحه اصلی UI
-# -----------------------------------------------------------------
 class AddWorkerPage(QWidget):
     def __init__(self):
         super().__init__()
@@ -197,11 +307,16 @@ class AddWorkerPage(QWidget):
         self.shifts_list = []
         self.cam_map = {}
 
+        # 🔴 استخراج مقادیر واژگان داینامیک از حافظه رجیستری
+        self.settings = QSettings("SmartVision", "AttendanceSystem")
+        self.t_single = self.settings.value("term_singular", "کارگر")
+        self.t_plural = self.settings.value("term_plural", "کارگران")
+
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(40, 20, 40, 20)
         main_layout.setSpacing(15)
 
-        title_label = QLabel("ثبت مشخصات و افزودن چهره کارگر جدید")
+        title_label = QLabel(f"ثبت مشخصات و افزودن چهره {self.t_single} جدید")
         title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
         main_layout.addWidget(title_label)
 
@@ -211,13 +326,13 @@ class AddWorkerPage(QWidget):
         self.input_national_id = QLineEdit()
         self.input_phone = QLineEdit()
 
-        form_layout.addRow("نام کارگر:", self.input_first_name)
+        form_layout.addRow(f"نام {self.t_single}:", self.input_first_name)
         form_layout.addRow("نام خانوادگی:", self.input_last_name)
         form_layout.addRow("کد ملی:", self.input_national_id)
         form_layout.addRow("تلفن همراه:", self.input_phone)
         main_layout.addLayout(form_layout)
 
-        shift_group = QGroupBox("برنامه‌های زمانی و شیفت‌های کارگر")
+        shift_group = QGroupBox(f"برنامه‌های زمانی و شیفت‌های {self.t_single}")
         shift_group.setStyleSheet("QGroupBox { font-weight: bold; color: #2980b9; border: 1px solid #bdc3c7; padding: 10px; margin-top: 10px; }")
         shift_layout = QVBoxLayout(shift_group)
 
@@ -251,7 +366,6 @@ class AddWorkerPage(QWidget):
         self.gallery_layout.setAlignment(Qt.AlignLeft)
         self.scroll_area.setWidget(self.scroll_widget)
         photo_layout.addWidget(self.scroll_area)
-        
         main_layout.addWidget(photo_group)
 
         self.lbl_loading = QLabel("")
@@ -259,7 +373,7 @@ class AddWorkerPage(QWidget):
         self.lbl_loading.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.lbl_loading)
 
-        self.btn_submit = QPushButton("💾 ذخیره کارگر و شیفت‌ها")
+        self.btn_submit = QPushButton(f"💾 ذخیره نهایی {self.t_single} و شیفت‌ها")
         self.btn_submit.setStyleSheet("background-color: #2ecc71; color: white; font-size: 15px; font-weight: bold; padding: 12px; border-radius: 5px;")
         self.btn_submit.clicked.connect(self.submit_form_data)
         main_layout.addWidget(self.btn_submit)
@@ -268,6 +382,8 @@ class AddWorkerPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.t_single = self.settings.value("term_singular", "کارگر")
+        self.t_plural = self.settings.value("term_plural", "کارگران")
         self.load_active_cameras()
 
     def load_active_cameras(self):
@@ -278,7 +394,7 @@ class AddWorkerPage(QWidget):
         except: pass
 
     def open_add_shift_dialog(self):
-        dialog = AddShiftDialog(self.cam_map, self)
+        dialog = AddShiftDialog(self.cam_map, self.shifts_list, self)
         if dialog.exec_() == QDialog.Accepted:
             self.shifts_list.append(dialog.shift_data)
             self.refresh_shifts_table()
@@ -287,25 +403,41 @@ class AddWorkerPage(QWidget):
         self.shifts_table.setRowCount(0)
         for idx, shift in enumerate(self.shifts_list):
             self.shifts_table.insertRow(idx)
-            
             cam_item = QTableWidgetItem(shift["camera_name"])
             cam_item.setTextAlignment(Qt.AlignCenter)
-            
             days_count = len(shift["allowed_days"].split(","))
             days_item = QTableWidgetItem(f"{days_count} روز در هفته")
             days_item.setTextAlignment(Qt.AlignCenter)
-            
             time_item = QTableWidgetItem(f"{shift['shift_start']} تا {shift['shift_end']}")
             time_item.setTextAlignment(Qt.AlignCenter)
             
-            del_btn = QPushButton("حذف شیفت 🗑")
-            del_btn.setStyleSheet("background-color: #e74c3c; color: white; padding: 2px;")
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout(actions_widget)
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            actions_layout.setSpacing(5)
+
+            edit_btn = QPushButton("ویرایش ✏️")
+            edit_btn.setStyleSheet("background-color: #f39c12; color: white; padding: 4px; font-size: 11px;")
+            edit_btn.clicked.connect(lambda _, i=idx: self.edit_temp_shift(i))
+
+            del_btn = QPushButton("حذف 🗑")
+            del_btn.setStyleSheet("background-color: #e74c3c; color: white; padding: 4px; font-size: 11px;")
             del_btn.clicked.connect(lambda _, i=idx: self.remove_shift(i))
+
+            actions_layout.addWidget(edit_btn)
+            actions_layout.addWidget(del_btn)
 
             self.shifts_table.setItem(idx, 0, cam_item)
             self.shifts_table.setItem(idx, 1, days_item)
             self.shifts_table.setItem(idx, 2, time_item)
-            self.shifts_table.setCellWidget(idx, 3, del_btn)
+            self.shifts_table.setCellWidget(idx, 3, actions_widget)
+
+    def edit_temp_shift(self, index):
+        shift_data = self.shifts_list[index]
+        dialog = EditTempShiftDialog(shift_data, index, self.cam_map, self.shifts_list, self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.shifts_list[index] = dialog.shift_data
+            self.refresh_shifts_table()
 
     def remove_shift(self, index):
         self.shifts_list.pop(index)
@@ -333,8 +465,7 @@ class AddWorkerPage(QWidget):
         self.shifts_list.clear()
         self.refresh_shifts_table()
         self.selected_photos.clear()
-        for i in reversed(range(self.gallery_layout.count())): 
-            self.gallery_layout.itemAt(i).widget().deleteLater()
+        for i in reversed(range(self.gallery_layout.count())): self.gallery_layout.itemAt(i).widget().deleteLater()
 
     def submit_form_data(self):
         first_name = self.input_first_name.text().strip()
@@ -347,7 +478,7 @@ class AddWorkerPage(QWidget):
             QMessageBox.warning(self, "خطا", "انتخاب حداقل یک عکس الزامی است.")
             return
         if not self.shifts_list:
-            reply = QMessageBox.question(self, "هشدار شیفت", "هیچ شیفتی تعریف نکرده‌اید. کارگر اجازه ورود نخواهد داشت! ادامه می‌دهید؟", QMessageBox.Yes | QMessageBox.No)
+            reply = QMessageBox.question(self, "هشدار شیفت", f"هیچ شیفتی برای این {self.t_single} تعریف نکرده‌اید. ادامه می‌دهید؟", QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.No: return
 
         payload = {
@@ -358,7 +489,7 @@ class AddWorkerPage(QWidget):
         }
 
         self.btn_submit.setEnabled(False)
-        self.thread = AddWorkerThread(payload, self.selected_photos)
+        self.thread = AddWorkerThread(payload, self.selected_photos, self.t_single, self.t_plural)
         self.thread.progress_signal.connect(self.lbl_loading.setText)
         self.thread.finished_signal.connect(self.on_registration_finished)
         self.thread.start()
