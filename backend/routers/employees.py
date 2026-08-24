@@ -32,7 +32,8 @@ def create_employee(employee: EmployeeCreate, db: Session = Depends(get_db)):
             camera_id=shift_data.camera_id,
             allowed_days=shift_data.allowed_days,
             shift_start=shift_data.shift_start,
-            shift_end=shift_data.shift_end
+            shift_end=shift_data.shift_end,
+            zone_mask=shift_data.zone_mask
         )
         db.add(new_shift)
     
@@ -97,7 +98,8 @@ def add_employee_shift(employee_id: int, shift: EmployeeShiftCreate, db: Session
         camera_id=shift.camera_id,
         allowed_days=shift.allowed_days,
         shift_start=shift.shift_start,
-        shift_end=shift.shift_end
+        shift_end=shift.shift_end,
+        zone_mask=shift.zone_mask
     )
     db.add(db_shift)
     db.commit()
@@ -123,6 +125,7 @@ def update_employee_shift(shift_id: int, data: EmployeeShiftCreate, db: Session 
     db_shift.allowed_days = data.allowed_days
     db_shift.shift_start = data.shift_start
     db_shift.shift_end = data.shift_end
+    db_shift.zone_mask = data.zone_mask
     
     db.commit()
     db.refresh(db_shift)

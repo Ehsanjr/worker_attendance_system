@@ -6,6 +6,7 @@ import numpy as np
 from pathlib import Path
 import traceback 
 import time
+import json # 🔴 اضافه شدن کتابخانه json برای پارس کردن ماسک
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -27,34 +28,20 @@ from api_client import APIClient
 from PIL import ImageFont, ImageDraw, Image
 import arabic_reshaper
 from bidi.algorithm import get_display
-import numpy as np
 
 def put_persian_text(frame, text, position, color=(0, 255, 0), font_size=20):
-    """تابع کمکی برای نوشتن متن فارسی روی فریم‌های OpenCV"""
-    # تبدیل فریم OpenCV به فرمت قابل فهم برای PIL
     img_pil = Image.fromarray(frame)
     draw = ImageDraw.Draw(img_pil)
-    
-    # مرتب‌سازی حروف فارسی از راست به چپ و چسباندن آن‌ها به هم
     reshaped_text = arabic_reshaper.reshape(text)
     bidi_text = get_display(reshaped_text)
-    
     try:
-        # استفاده از فونت استاندارد ویندوز (Tahoma)
         font = ImageFont.truetype("tahoma.ttf", font_size)
     except:
         font = ImageFont.load_default()
-        
-    # رسم متن
     draw.text(position, bidi_text, font=font, fill=color)
-    
-    # بازگرداندن فریم به فرمت آرایه OpenCV
     np.copyto(frame, np.array(img_pil))
     return frame
 
-# -----------------------------------------------------------------
-# تابع ارسال دیتای تردد به بک‌اند (کپی دقیق از منطق شما)
-# -----------------------------------------------------------------
 def event_sender_worker(event_queue, api_client, stop_event):
     while not stop_event.is_set() or not event_queue.empty():
         try:
@@ -66,10 +53,6 @@ def event_sender_worker(event_queue, api_client, stop_event):
         except Exception as ex:
             print(f"[API ERROR] {ex}")
 
-
-# -----------------------------------------------------------------
-# هسته مرکزی هوش مصنوعی (با استارت خودکار استریم و سیستم دیباگ زنده)
-# -----------------------------------------------------------------
 class CentralAIEngineThread(QThread):
     frame_ready = pyqtSignal(str, QImage)
 
@@ -78,6 +61,8 @@ class CentralAIEngineThread(QThread):
         self._run_flag = True
         self.cmd_queue = queue.Queue() 
         self.last_emit_time = {}
+        # 🔴 کش کردن ماسک‌های نواحی مجاز کارگران برای کاهش درخواست‌های API
+        self.employee_zones_cache = {} 
 
     def run(self):
         api_client = APIClient("http://localhost:8000")
@@ -97,7 +82,6 @@ class CentralAIEngineThread(QThread):
         tracker = SimpleTracker()
         attendance = AttendanceLogic(absent_timeout_seconds=10)
 
-        # اینجا دوربین‌های اولیه استارت می‌شوند (که فعلاً خالی است)
         manager.start_all()
         
         active_cameras = {}
@@ -108,7 +92,6 @@ class CentralAIEngineThread(QThread):
 
         while self._run_flag:
             try:
-                # ۱. مدیریت دستورات UI
                 while not self.cmd_queue.empty():
                     cmd = self.cmd_queue.get()
                     action = cmd["action"]
@@ -116,27 +99,24 @@ class CentralAIEngineThread(QThread):
                     cam_id = str(cam["id"])
                     
                     if action == "add":
-                        zone = tuple(cam.get("zones", [0, 0, 0, 0]))
                         cam_type = cam["type"]
                         url = str(cam["rtsp_url"])
                         
                         if cam_type == "webcam":
-                            stream = WebcamStream(int(url) if url.isdigit() else 0, zone)
+                            stream = WebcamStream(int(url) if url.isdigit() else 0)
                         else:
                             full_path = BASE_DIR / url.lstrip("/\\")
-                            stream = VideoFileStream(str(full_path), zone)
+                            stream = VideoFileStream(str(full_path))
                             
                         manager.add_camera(cam_id, stream)
                         active_cameras[cam_id] = True
                         last_known_tracks[cam_id] = []
                         
-                        # 🔥 تغییر کلیدی: استارت کردن اجباری دوربینِ تازه وارد
                         print(f"⏳ [AI Thread] در حال روشن کردن استریم دوربین {cam_id}...")
                         stream.start_stream()
                         print(f"✅ [AI Thread] دوربین {cam_id} روشن شد.")
                         
                     elif action == "remove":
-                        # 🔥 متوقف کردن اجباری استریم هنگام برداشتن تیک
                         if cam_id in active_cameras:
                             stream_obj = manager.cameras.get(cam_id) if hasattr(manager, 'cameras') else None
                             if stream_obj and hasattr(stream_obj, 'stop'):
@@ -152,7 +132,6 @@ class CentralAIEngineThread(QThread):
                     self.msleep(100)
                     continue
 
-                # ۲. دریافت فریم‌ها
                 frames = manager.get_frames()
                 frame_counter += 1
 
@@ -160,19 +139,16 @@ class CentralAIEngineThread(QThread):
                     if cam_id not in active_cameras:
                         continue
 
-                    raw_frame, zone = data
+                    raw_frame = data # 🔴 متغیر zone دوربین قدیمی دیگر نیاز نیست
                     
                     if raw_frame is None:
-                        # اگر دوربین فریم ندهد، در ترمینال چاپ می‌شود تا بفهمیم مشکل از سورس است
                         if frame_counter % 30 == 0:
                             print(f"⚠️ [AI Thread] هشدار: فریم جدیدی از دوربین {cam_id} دریافت نشد!")
                         continue
 
                     frame = raw_frame.copy()
-                    zx1, zy1, zx2, zy2 = map(int, zone)
-                    cv2.rectangle(frame, (zx1, zy1), (zx2, zy2), (100, 200, 100), 2)
+                    h_frame, w_frame = frame.shape[:2]
 
-                    # ۳. هوش مصنوعی
                     if frame_counter % 3 == 0:
                         current_camera_tracks = []
                         detections = detector.detect(frame)
@@ -184,18 +160,54 @@ class CentralAIEngineThread(QThread):
                             name = result.get("name", "unknown")
                             employee_id = result.get("employee_id")
                             
-                            # --- این دو خط کلیدی برای جلوگیری از کرش API اضافه شود ---
                             if employee_id is None:
-                                employee_id = 0 # تخصیص آیدی صفر به افراد ناشناس
-                            # ---------------------------------------------------------
+                                employee_id = 0 
                             
-                            raw_face_bbox = result.get("face_bbox", [x1, y1, x2, y2])
+                            raw_face_bbox = result.get("face_bbox")
+                            if raw_face_bbox is None:
+                                raw_face_bbox = [x1, y1, x2, y2]
                             fx1, fy1, fx2, fy2 = map(int, raw_face_bbox)
 
+                            # 🔴 بررسی منطق گرید (Grid Zone) برای کارگر تشخیص داده شده
+                            is_inside_grid = False
+                            if employee_id > 0:
+                                # واکشی از سرور در صورت عدم وجود در کش
+                                if employee_id not in self.employee_zones_cache:
+                                    self.employee_zones_cache[employee_id] = {}
+                                    try:
+                                        resp = requests.get(f"http://localhost:8000/employees/{employee_id}")
+                                        if resp.status_code == 200:
+                                            emp_data = resp.json()
+                                            for shift in emp_data.get("shifts", []):
+                                                s_cam_id = shift.get("camera_id")
+                                                mask_str = shift.get("zone_mask")
+                                                cells = set()
+                                                if mask_str:
+                                                    try:
+                                                        cells = set(tuple(c) for c in json.loads(mask_str))
+                                                    except: pass
+                                                
+                                                key = str(s_cam_id) if s_cam_id is not None else "all"
+                                                self.employee_zones_cache[employee_id][key] = cells
+                                    except Exception as e:
+                                        print(f"Error fetching employee shifts: {e}")
+
+                                # بررسی اینکه آیا مرکز باکس کارگر در منطقه مجاز اوست یا خیر
+                                emp_cams = self.employee_zones_cache.get(employee_id, {})
+                                allowed_cells = emp_cams.get(str(cam_id), emp_cams.get("all", set()))
+                                
+                                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                                grid_r, grid_c = int((cy / h_frame) * 16), int((cx / w_frame) * 16)
+                                
+                                if (grid_r, grid_c) in allowed_cells:
+                                    is_inside_grid = True
+
+                            # آپدیت ترکر (zone قدیمی را بی‌اثر می‌فرستیم)
                             track = tracker.update(
                                 camera_id=cam_id, name=name, employee_id=employee_id, 
-                                bbox=[x1, y1, x2, y2], zone=zone
+                                bbox=[x1, y1, x2, y2], inside_zone=is_inside_grid
                             )
+                            
                             current_camera_tracks.append((track, [fx1, fy1, fx2, fy2]))
                         
                         last_known_tracks[cam_id] = current_camera_tracks
@@ -210,21 +222,14 @@ class CentralAIEngineThread(QThread):
                         fx1, fy1, fx2, fy2 = map(int, face_bbox)
                         cv2.rectangle(frame, (fx1, fy1), (fx2, fy2), color, 2)
 
-                        # ۱. استخراج وضعیت از ترکر (بر اساس کدهای tracker.py شما)
-                        status_str = "داخل" if track.inside_zone else "بیرون"
-
-                        # ۲. ترکیب نام و وضعیت با یک خط تیره برای جلوگیری از به هم ریختگی حروف فارسی
+                        status_str = "داخل ناحیه مجاز" if track.inside_zone else "خارج از ناحیه"
                         display_text = f"{name} - {status_str}"
 
-                        # ۳. محاسبه موقعیت Y به صورت داینامیک (چسبیده به سقف باکس)
                         font_size = 30
-            
                         if fy1 <= 0: 
-                            fy1 = fy1 + 20 # اگر کادر به سقف تصویر چسبیده بود، متن را داخل کادر بینداز
+                            fy1 = fy1 + 20 
 
-                        # ۵. چاپ نهایی متن روی تصویر
                         frame = put_persian_text(frame, display_text, (fx1, fy1-70), color=color, font_size=font_size)
-                        #cv2.putText(frame, label, (fx1, fy1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
                     rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     resized = cv2.resize(rgb_image, (640, 480), interpolation=cv2.INTER_LINEAR)
@@ -233,7 +238,7 @@ class CentralAIEngineThread(QThread):
                     qt_img = QImage(resized.data, w, h, ch * w, QImage.Format_RGB888).copy()
                     now = time.time()
                     last = self.last_emit_time.get(cam_id, 0)
-                    if now - last >= 0.033:  # حداکثر ۳۰ فریم در ثانیه به UI
+                    if now - last >= 0.033:  
                         self.last_emit_time[cam_id] = now
                         self.frame_ready.emit(cam_id, qt_img)
 
@@ -256,9 +261,6 @@ class CentralAIEngineThread(QThread):
         self._run_flag = False
         self.wait()
 
-# -----------------------------------------------------------------
-# Thread دریافت لیست دوربین‌ها از API (بدون تغییر)
-# -----------------------------------------------------------------
 class FetchCamerasThread(QThread):
     cameras_ready = pyqtSignal(list)
     error_occurred = pyqtSignal(str)
@@ -272,10 +274,6 @@ class FetchCamerasThread(QThread):
         except Exception as e:
             self.error_occurred.emit(str(e))
 
-
-# -----------------------------------------------------------------
-# کلاس رابط کاربری داشبورد زنده
-# -----------------------------------------------------------------
 class LiveDashboardPage(QWidget):
     def __init__(self):
         super().__init__()
@@ -283,7 +281,6 @@ class LiveDashboardPage(QWidget):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(20)
 
-        # پنل راست: لیست دوربین‌ها
         self.camera_panel = QFrame()
         self.camera_panel.setObjectName("Card")
         self.camera_panel.setFixedWidth(250)
@@ -303,7 +300,6 @@ class LiveDashboardPage(QWidget):
         scroll_area.setWidget(self.checkbox_container)
         camera_panel_layout.addWidget(scroll_area)
 
-        # پنل چپ: ویدیوی دوربین‌ها
         self.video_area = QFrame()
         self.video_area.setObjectName("Card")
         self.video_layout = QGridLayout(self.video_area)
@@ -314,7 +310,6 @@ class LiveDashboardPage(QWidget):
 
         self.active_labels = {}
         
-        # استارت کردن هسته مرکزی پردازش به محض باز شدن صفحه
         self.ai_engine = CentralAIEngineThread()
         self.ai_engine.frame_ready.connect(self.update_image,Qt.QueuedConnection)
         self.ai_engine.start()
@@ -322,16 +317,14 @@ class LiveDashboardPage(QWidget):
         self.load_cameras()
 
     def showEvent(self, event):
-        """هر بار که کاربر تب داشبورد را باز می‌کند، لیست چک‌باکس‌ها با دیتابیس سینک می‌شود"""
         super().showEvent(event)
-        
-        # پاک کردن چک‌باکس‌های قدیمی قبل از دریافت جدیدها
         for i in reversed(range(self.checkbox_layout.count())): 
             widget = self.checkbox_layout.itemAt(i).widget()
             if widget is not None:
                 widget.setParent(None)
                 
         self.load_cameras()
+
     def load_cameras(self):
         self.api_thread = FetchCamerasThread()
         self.api_thread.cameras_ready.connect(self.populate_checkboxes)
@@ -347,7 +340,6 @@ class LiveDashboardPage(QWidget):
             cam_name = cam.get("name", f"Camera {cam['id']}")
             checkbox = QCheckBox(cam_name)
             checkbox.setStyleSheet("font-size: 14px; padding: 5px;")
-            # وقتی تیک چک‌باکس زده شد، تابع مربوطه با اطلاعات کامل دوربین صدا زده می‌شود
             checkbox.toggled.connect(lambda checked, c=cam: self.toggle_camera(checked, c))
             self.checkbox_layout.addWidget(checkbox)
 
@@ -355,20 +347,14 @@ class LiveDashboardPage(QWidget):
         cam_id = str(cam_dict["id"])
         
         if is_checked:
-            # ساخت باکس ویدیویی
             video_label = QLabel(f"در حال اتصال به {cam_dict['name']}...")
             video_label.setAlignment(Qt.AlignCenter)
             video_label.setStyleSheet("background-color: black; color: white; border-radius: 5px;")
             video_label.setMinimumSize(400, 300)
             self.active_labels[cam_id] = video_label
-            
-            # ارسال دستور روشن کردن پردازش به موتور AI
             self.ai_engine.cmd_queue.put({"action": "add", "cam": cam_dict})
         else:
-            # ارسال دستور توقف پردازش
             self.ai_engine.cmd_queue.put({"action": "remove", "cam": cam_dict})
-            
-            # حذف باکس ویدیویی
             if cam_id in self.active_labels:
                 widget_to_remove = self.active_labels.pop(cam_id)
                 self.video_layout.removeWidget(widget_to_remove)
@@ -394,6 +380,5 @@ class LiveDashboardPage(QWidget):
         QMessageBox.warning(self, "خطا", f"ارتباط با دیتابیس قطع است:\n{error_msg}")
         
     def closeEvent(self, event):
-        # توقف ایمن Thread هنگام بستن کامل نرم‌افزار
         self.ai_engine.stop()
         super().closeEvent(event)

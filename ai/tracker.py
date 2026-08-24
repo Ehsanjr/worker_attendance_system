@@ -1,8 +1,6 @@
 from datetime import datetime, timedelta
 
-
 class Track:
-
     def __init__(self, track_id, name, bbox, camera_id, employee_id=None):
         self.track_id = track_id
         self.name = name
@@ -13,7 +11,8 @@ class Track:
         self.first_seen = datetime.now()
         self.last_seen = datetime.now()
 
-        self.inside_zone = False
+        # 🔴 وضعیت حضور در ناحیه مجاز (از طریق گرید مشخص می‌شود)
+        self.inside_zone = False 
         self.enter_sent = False
         self.exit_sent = False
         self.absent_sent = False
@@ -26,9 +25,7 @@ class Track:
             f"camera={self.camera_id}, inside_zone={self.inside_zone})"
         )
 
-
 class SimpleTracker:
-
     def __init__(self, iou_threshold=0.3):
         self.tracks = {}
         self.next_track_id = 1
@@ -61,11 +58,12 @@ class SimpleTracker:
                 continue
             iou = self.compute_iou(bbox, tr.bbox)
             if iou > best_iou:
-                best_iou, best = iou, tr
+                best_iou = iou  # 🔴 اصلاح شد: مقدار اعشاری مستقیماً به best_iou اختصاص می یابد
+                best = tr       # 🔴 اصلاح شد: شیء ترک به متغیر best داده می شود
 
         return best if best_iou >= self.iou_threshold else None
 
-    def update(self, camera_id, name, bbox, zone, employee_id):
+    def update(self, camera_id, name, bbox, employee_id, inside_zone=False, **kwargs):
         track = self.find_best_track(bbox, camera_id)
 
         if track is None:
@@ -86,11 +84,8 @@ class SimpleTracker:
                 track.name = name
                 track.employee_id = employee_id
 
-        # Check inside zone
-        cx = (bbox[0] + bbox[2]) // 2
-        cy = (bbox[1] + bbox[3]) // 2
-        zx1, zy1, zx2, zy2 = zone
-        track.inside_zone = zx1 <= cx <= zx2 and zy1 <= cy <= zy2
+        # 🔴 آپدیت وضعیت حضور فرد در ناحیه ماسک شده
+        track.inside_zone = inside_zone
 
         return track
 

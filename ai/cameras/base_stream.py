@@ -4,10 +4,9 @@ from threading import Thread
 from abc import ABC
 
 class BaseCameraStream(ABC):
-    def __init__(self, source, zone):
+    def __init__(self, source): # 🔴 آرگومان zone حذف شد
         self.source = source
         self.resize = (1280, 720) 
-        self.zone = zone
         
         # بهینه‌سازی بسیار مهم برای وب‌کم‌ها در سیستم‌عامل ویندوز
         if isinstance(source, int):
@@ -60,7 +59,7 @@ class BaseCameraStream(ABC):
         self.stream.release()
 
     def read_stream(self):
-        return self.frame, self.zone
+        return self.frame # 🔴 فقط فریم برگردانده می‌شود (بدون zone)
 
     def stop_stream(self):
         self.stopped = True

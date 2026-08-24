@@ -1,9 +1,8 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON
+from sqlalchemy import Column, Integer, String, Boolean, DateTime
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
 from database import Base
-
 
 class Camera(Base):
     __tablename__ = "cameras"
@@ -13,7 +12,6 @@ class Camera(Base):
     type = Column(String, nullable=False)
     rtsp_url = Column(String, nullable=True)
     location = Column(String, nullable=True)
-    zones = Column(JSON, nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     is_deleted = Column(Boolean, default=False) 

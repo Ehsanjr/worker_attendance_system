@@ -34,6 +34,10 @@ class EmployeeShift(Base):
     allowed_days = Column(String, default="0,1,2,3,4,5,6")
     shift_start = Column(String, default="00:00")
     shift_end = Column(String, default="23:59")
+    
+    # 🔴 فیلد جدید برای ذخیره ناحیه گرید ماسک به فرمت رشته‌ای (JSON String)
+    zone_mask = Column(String, nullable=True)
+    
     is_deleted = Column(Boolean, default=False)
 
     employee = relationship("Employee", back_populates="shifts")

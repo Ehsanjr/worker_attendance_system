@@ -8,6 +8,8 @@ class EmployeeShiftBase(BaseModel):
     allowed_days: Optional[str] = "0,1,2,3,4,5,6"
     shift_start: Optional[str] = "00:00"
     shift_end: Optional[str] = "23:59"
+    # 🔴 اضافه شدن فیلد ناحیه شبکه به اسکیما
+    zone_mask: Optional[str] = None
 
 class EmployeeShiftCreate(EmployeeShiftBase):
     pass

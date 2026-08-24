@@ -55,7 +55,6 @@ class EditCameraThread(QThread):
             if response.status_code == 200:
                 self.finished_signal.emit(True, "اطلاعات دوربین با موفقیت ویرایش شد.")
             else:
-                # 🔴 اضافه شدن response.text برای گزارش دقیق متن ارور از بک‌اند
                 self.finished_signal.emit(False, f"خطا از سمت سرور ({response.status_code}):\n{response.text}")
         except Exception as e:
             self.finished_signal.emit(False, f"خطای ارتباطی:\n{str(e)}")
@@ -105,10 +104,6 @@ class AddCameraDialog(QDialog):
         self.input_location = QLineEdit()
         self.input_location.setPlaceholderText("مثال: درب ورودی سوله 1")
         
-        self.input_zone = QLineEdit()
-        self.input_zone.setPlaceholderText("مختصات منطقه: 0, 0, 1280, 720")
-        self.input_zone.setText("0, 0, 1280, 720") 
-        
         self.combo_status = QComboBox()
         self.combo_status.addItems(["فعال (Active)", "غیرفعال (Inactive)"])
 
@@ -116,7 +111,6 @@ class AddCameraDialog(QDialog):
         layout.addRow("نوع دوربین:", self.combo_type)
         layout.addRow("لینک (URL) یا آیدی:", self.input_url)
         layout.addRow("مکان (Location):", self.input_location)
-        layout.addRow("زون تصویر:", self.input_zone)
         layout.addRow("وضعیت دوربین:", self.combo_status)
 
         btn_layout = QHBoxLayout()
@@ -136,7 +130,6 @@ class AddCameraDialog(QDialog):
         name = self.input_name.text().strip()
         url = self.input_url.text().strip()
         location = self.input_location.text().strip()
-        zone_str = self.input_zone.text().strip()
 
         if not name or not url:
             QMessageBox.warning(self, "اخطار", "نام دوربین و لینک (URL) الزامی هستند!")
@@ -146,19 +139,11 @@ class AddCameraDialog(QDialog):
         cam_type = type_mapping.get(self.combo_type.currentText(), "webcam")
         is_active = True if "فعال" in self.combo_status.currentText() and "غیرفعال" not in self.combo_status.currentText() else False
 
-        try:
-            zones_list = [int(x.strip()) for x in zone_str.split(',')]
-            if len(zones_list) != 4: raise ValueError
-        except:
-            QMessageBox.warning(self, "اخطار", "مختصات زون باید دقیقاً شامل 4 عدد با کاما باشد (مثال: 0,0,1280,720)")
-            return
-
         payload = {
             "name": name,
             "type": cam_type,
             "rtsp_url": url,
             "location": location,
-            "zones": zones_list,
             "is_active": is_active
         }
 
@@ -198,20 +183,6 @@ class EditCameraDialog(QDialog):
         self.input_url = QLineEdit(cam_data.get("rtsp_url", ""))
         self.input_location = QLineEdit(cam_data.get("location", ""))
         
-        # 🔴 پاکسازی و حل مشکل String شدن Zones توسط دیتابیس
-        import json
-        zones_raw = cam_data.get("zones", [0, 0, 1280, 720])
-        if isinstance(zones_raw, str):
-            try:
-                zones_array = json.loads(zones_raw)
-            except:
-                zones_array = [0, 0, 1280, 720]
-        else:
-            zones_array = zones_raw
-            
-        zones_str = ", ".join(map(str, zones_array))
-        self.input_zone = QLineEdit(zones_str)
-        
         self.combo_status = QComboBox()
         self.combo_status.addItems(["فعال (Active)", "غیرفعال (Inactive)"])
         if cam_data.get("is_active", True):
@@ -223,7 +194,6 @@ class EditCameraDialog(QDialog):
         layout.addRow("نوع دوربین:", self.combo_type)
         layout.addRow("لینک (URL) یا آیدی:", self.input_url)
         layout.addRow("مکان (Location):", self.input_location)
-        layout.addRow("زون تصویر:", self.input_zone)
         layout.addRow("وضعیت دوربین:", self.combo_status)
 
         btn_layout = QHBoxLayout()
@@ -243,7 +213,6 @@ class EditCameraDialog(QDialog):
         name = self.input_name.text().strip()
         url = self.input_url.text().strip()
         location = self.input_location.text().strip()
-        zone_str = self.input_zone.text().strip()
 
         if not name or not url:
             QMessageBox.warning(self, "اخطار", "نام دوربین و لینک (URL) الزامی هستند!")
@@ -253,19 +222,11 @@ class EditCameraDialog(QDialog):
         cam_type = type_mapping.get(self.combo_type.currentText(), "webcam")
         is_active = True if "فعال" in self.combo_status.currentText() and "غیرفعال" not in self.combo_status.currentText() else False
 
-        try:
-            zones_list = [int(x.strip()) for x in zone_str.split(',')]
-            if len(zones_list) != 4: raise ValueError
-        except:
-            QMessageBox.warning(self, "اخطار", "مختصات زون باید دقیقاً شامل 4 عدد با کاما باشد")
-            return
-
         payload = {
             "name": name,
             "type": cam_type,
             "rtsp_url": url,
             "location": location,
-            "zones": zones_list,
             "is_active": is_active
         }
 
@@ -299,17 +260,15 @@ class CamerasPage(QWidget):
         title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
         layout.addWidget(title_label)
 
-        # جدول با 5 ستون (ستون جدید برای عملیات)
         self.table = QTableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["آیدی", "نام / نوع دوربین", "موقعیت (Location)", "وضعیت فعالیت", "عملیات"])
         self.table.setColumnHidden(0, True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents) 
-        self.table.setColumnWidth(4, 150) # عرض ثابت برای دکمه‌ها
+        self.table.setColumnWidth(4, 150)
         layout.addWidget(self.table)
 
-        # دکمه افزودن دوربین
         bottom_layout = QHBoxLayout()
         bottom_layout.addStretch()
         
@@ -377,7 +336,6 @@ class CamerasPage(QWidget):
                 
             self.table.setItem(row_idx, 3, status_item)
 
-            # --- ساخت دکمه‌های عملیات (ویرایش و حذف) ---
             actions_widget = QWidget()
             actions_layout = QHBoxLayout(actions_widget)
             actions_layout.setContentsMargins(5, 2, 5, 2)
@@ -409,7 +367,6 @@ class CamerasPage(QWidget):
             self.load_cameras() 
 
     def delete_camera(self, cam_id):
-        # دیالوگ تاییدیه قبل از حذف
         reply = QMessageBox.question(
             self, 'تایید حذف', 
             f"آیا از حذف دائم دوربین شماره {cam_id} اطمینان دارید؟\nاین عملیات غیرقابل بازگشت است.",

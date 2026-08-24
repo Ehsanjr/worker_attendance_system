@@ -1,5 +1,6 @@
 import os
 import shutil
+import json
 import requests
 from pathlib import Path
 import cv2
@@ -9,9 +10,8 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
                              QLineEdit, QPushButton, QLabel, QFileDialog, QMessageBox,
                              QComboBox, QCheckBox, QGridLayout, QGroupBox,
                              QTableWidget, QTableWidgetItem, QHeaderView, QScrollArea, QDialog)
-# 🔴 اضافه شدن QSettings برای بومی‌سازی عناوین متنی صفحه تعریف کارگر جدید
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QRect
+from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QImage
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 WORKERS_DIR = BASE_DIR / "data" / "workers"
@@ -51,6 +51,152 @@ def validate_shift_logic(new_shift, existing_shifts, exclude_index=None, cam_map
             warnings.append(f"تداخل زمانی در روزهای مشترک با شیفت ({shift['shift_start']} تا {shift['shift_end']} - {c_name}).")
     return warnings
 
+class InteractiveGridWidget(QWidget):
+    def __init__(self, pixmap, rows=16, cols=16, initial_selected=None, parent=None):
+        super().__init__(parent)
+        self.pixmap = pixmap
+        self.rows = rows
+        self.cols = cols
+        self.selected_cells = set(initial_selected) if initial_selected else set()
+        self.is_drawing = False
+        self.draw_mode = True 
+        self.setFixedSize(640, 480)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            cell = self.get_cell_at(event.pos())
+            if cell:
+                self.is_drawing = True
+                self.draw_mode = cell not in self.selected_cells
+                self.toggle_cell(cell, self.draw_mode)
+
+    def mouseMoveEvent(self, event):
+        if self.is_drawing:
+            cell = self.get_cell_at(event.pos())
+            if cell:
+                self.toggle_cell(cell, self.draw_mode)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_drawing = False
+
+    def get_cell_at(self, pos):
+        cw = self.width() / self.cols
+        ch = self.height() / self.rows
+        c = int(pos.x() // cw)
+        r = int(pos.y() // ch)
+        if 0 <= r < self.rows and 0 <= c < self.cols:
+            return (r, c)
+        return None
+
+    def toggle_cell(self, cell, select):
+        if select:
+            self.selected_cells.add(cell)
+        else:
+            self.selected_cells.discard(cell)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        if self.pixmap and not self.pixmap.isNull():
+            painter.drawPixmap(self.rect(), self.pixmap)
+        
+        cw = self.width() / self.cols
+        ch = self.height() / self.rows
+
+        brush = QBrush(QColor(46, 204, 113, 100))
+        painter.setBrush(brush)
+        painter.setPen(Qt.NoPen)
+        for r, c in self.selected_cells:
+            rect = QRect(int(c * cw), int(r * ch), int(cw), int(ch))
+            painter.drawRect(rect)
+
+        pen = QPen(QColor(255, 255, 255, 120), 1, Qt.DashLine)
+        painter.setPen(pen)
+        for r in range(self.rows + 1):
+            painter.drawLine(0, int(r * ch), self.width(), int(r * ch))
+        for c in range(self.cols + 1):
+            painter.drawLine(int(c * cw), 0, int(c * cw), self.height())
+
+class GridZoneSelectorDialog(QDialog):
+    def __init__(self, camera_id, camera_name, existing_mask=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"تعیین نواحی مجاز - {camera_name}")
+        self.setLayoutDirection(Qt.RightToLeft)
+        self.selected_mask = existing_mask
+        
+        layout = QVBoxLayout(self)
+        
+        lbl_hint = QLabel("روی خانه‌های شبکه کلیک کنید یا موس را بکشید تا نواحی مجاز هایلایت شوند.")
+        lbl_hint.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        layout.addWidget(lbl_hint)
+
+        pixmap = self.fetch_camera_frame(camera_id)
+        
+        initial_selected = []
+        if existing_mask:
+            try:
+                initial_selected = [tuple(item) for item in json.loads(existing_mask)]
+            except: pass
+
+        self.grid_widget = InteractiveGridWidget(pixmap, rows=16, cols=16, initial_selected=initial_selected)
+        layout.addWidget(self.grid_widget)
+
+        btn_layout = QHBoxLayout()
+        clear_btn = QPushButton("پاک‌سازی همه")
+        clear_btn.clicked.connect(self.clear_all)
+        
+        save_btn = QPushButton("ثبت ناحیه")
+        save_btn.setStyleSheet("background-color: #2ecc71; color: white; font-weight: bold;")
+        save_btn.clicked.connect(self.save)
+        
+        cancel_btn = QPushButton("انصراف")
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_layout.addWidget(clear_btn)
+        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def fetch_camera_frame(self, camera_id):
+        # 🔴 اصلاح‌شده جهت جلوگیری از تصویر سیاه و اطمینان از گرفتن فریم زنده
+        try:
+            res = requests.get(f"http://localhost:8000/cameras/{camera_id}")
+            if res.status_code == 200:
+                cam_data = res.json()
+                url = cam_data.get("rtsp_url", "")
+                if cam_data.get("type") == "video":
+                    full_path = BASE_DIR / url.lstrip("/\\")
+                else:
+                    full_path = url # اگر لینک مستقیم یا ریتم استریم دوربین باشد
+                
+                cap = cv2.VideoCapture(full_path if not str(full_path).isdigit() else int(full_path))
+                if cap.isOpened():
+                    for _ in range(5): # رد کردن فریم‌های احتمالی اولیه محافظه‌کارانه
+                        cap.read()
+                    ret, frame = cap.read()
+                    cap.release()
+                    if ret and frame is not None:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        h, w, ch = frame.shape
+                        qimg = QImage(frame.data, w, h, ch * w, QImage.Format_RGB888)
+                        return QPixmap.fromImage(qimg)
+        except Exception as e:
+            print(f"Error fetching camera frame: {e}")
+        
+        img = QImage(640, 480, QImage.Format_RGB888)
+        img.fill(Qt.black)
+        return QPixmap.fromImage(img)
+
+    def clear_all(self):
+        self.grid_widget.selected_cells.clear()
+        self.grid_widget.update()
+
+    def save(self):
+        cells_list = list(self.grid_widget.selected_cells)
+        self.selected_mask = json.dumps(cells_list)
+        self.accept()
+
 class ThumbnailWidget(QWidget):
     def __init__(self, img_path, remove_callback, parent=None):
         super().__init__(parent)
@@ -77,17 +223,23 @@ class AddShiftDialog(QDialog):
     def __init__(self, cam_map, existing_shifts, parent=None):
         super().__init__(parent)
         self.setWindowTitle("تعریف شیفت و دوربین جدید")
-        self.setFixedWidth(400)
+        self.setFixedWidth(420)
         self.setLayoutDirection(Qt.RightToLeft)
         self.shift_data = None
         self.existing_shifts = existing_shifts
         self.cam_map = cam_map
+        self.zone_mask = None
         
         layout = QFormLayout(self)
         self.combo_camera = QComboBox()
         self.combo_camera.addItem("همه دوربین‌ها", None)
         for c_id, c_name in cam_map.items(): self.combo_camera.addItem(c_name, c_id)
         layout.addRow("دوربین مجاز:", self.combo_camera)
+
+        self.btn_zone = QPushButton("🟩 تعیین نواحی مجاز روی تصویر")
+        self.btn_zone.setStyleSheet("background-color: #16a085; color: white; padding: 5px; font-weight: bold;")
+        self.btn_zone.clicked.connect(self.open_zone_selector)
+        layout.addRow("منطقه مجاز:", self.btn_zone)
 
         self.days_checkboxes = {}
         days_mapping = [(5, "شنبه"), (6, "یک‌شنبه"), (0, "دوشنبه"), (1, "سه‌شنبه"), (2, "چهارشنبه"), (3, "پنج‌شنبه"), (4, "جمعه")]
@@ -138,6 +290,17 @@ class AddShiftDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         layout.addRow(btn_layout)
 
+    def open_zone_selector(self):
+        cam_id = self.combo_camera.currentData()
+        if not cam_id:
+            QMessageBox.warning(self, "خطا", "لطفاً ابتدا یک دوربین خاص را انتخاب کنید.")
+            return
+        cam_name = self.combo_camera.currentText()
+        dialog = GridZoneSelectorDialog(cam_id, cam_name, existing_mask=self.zone_mask, parent=self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.zone_mask = dialog.selected_mask
+            self.btn_zone.setText("✅ منطقه مجاز تنظیم شد")
+
     def submit(self):
         selected_days = [str(val) for val, chk in self.days_checkboxes.items() if chk.isChecked()]
         if not selected_days:
@@ -148,7 +311,8 @@ class AddShiftDialog(QDialog):
             "camera_name": self.combo_camera.currentText(),
             "allowed_days": ",".join(selected_days),
             "shift_start": f"{self.start_h_cb.currentText()}:{self.start_m_cb.currentText()}",
-            "shift_end": f"{self.end_h_cb.currentText()}:{self.end_m_cb.currentText()}"
+            "shift_end": f"{self.end_h_cb.currentText()}:{self.end_m_cb.currentText()}",
+            "zone_mask": self.zone_mask
         }
         warnings = validate_shift_logic(shift_data, self.existing_shifts, cam_map=self.cam_map)
         if warnings:
@@ -162,12 +326,13 @@ class EditTempShiftDialog(QDialog):
     def __init__(self, shift_data, shift_index, cam_map, existing_shifts, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ویرایش شیفت انتخاب شده")
-        self.setFixedWidth(400)
+        self.setFixedWidth(420)
         self.setLayoutDirection(Qt.RightToLeft)
         self.shift_data = shift_data
         self.shift_index = shift_index
         self.existing_shifts = existing_shifts
         self.cam_map = cam_map
+        self.zone_mask = shift_data.get("zone_mask")
         
         layout = QFormLayout(self)
         self.combo_camera = QComboBox()
@@ -178,6 +343,12 @@ class EditTempShiftDialog(QDialog):
             idx = self.combo_camera.findData(saved_cam_id)
             if idx >= 0: self.combo_camera.setCurrentIndex(idx)
         layout.addRow("دوربین مجاز:", self.combo_camera)
+
+        btn_text = "✅ منطقه مجاز تنظیم شده" if self.zone_mask else "🟩 تعیین نواحی مجاز روی تصویر"
+        self.btn_zone = QPushButton(btn_text)
+        self.btn_zone.setStyleSheet("background-color: #16a085; color: white; padding: 5px; font-weight: bold;")
+        self.btn_zone.clicked.connect(self.open_zone_selector)
+        layout.addRow("منطقه مجاز:", self.btn_zone)
 
         saved_days = shift_data.get("allowed_days", "").split(",")
         self.days_checkboxes = {}
@@ -231,6 +402,17 @@ class EditTempShiftDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         layout.addRow(btn_layout)
 
+    def open_zone_selector(self):
+        cam_id = self.combo_camera.currentData()
+        if not cam_id:
+            QMessageBox.warning(self, "خطا", "لطفاً ابتدا یک دوربین خاص را انتخاب کنید.")
+            return
+        cam_name = self.combo_camera.currentText()
+        dialog = GridZoneSelectorDialog(cam_id, cam_name, existing_mask=self.zone_mask, parent=self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.zone_mask = dialog.selected_mask
+            self.btn_zone.setText("✅ منطقه مجاز تنظیم شد")
+
     def submit(self):
         selected_days = [str(val) for val, chk in self.days_checkboxes.items() if chk.isChecked()]
         if not selected_days:
@@ -241,7 +423,8 @@ class EditTempShiftDialog(QDialog):
             "camera_name": self.combo_camera.currentText(),
             "allowed_days": ",".join(selected_days),
             "shift_start": f"{self.start_h_cb.currentText()}:{self.start_m_cb.currentText()}",
-            "shift_end": f"{self.end_h_cb.currentText()}:{self.end_m_cb.currentText()}"
+            "shift_end": f"{self.end_h_cb.currentText()}:{self.end_m_cb.currentText()}",
+            "zone_mask": self.zone_mask
         }
         warnings = validate_shift_logic(shift_data, self.existing_shifts, exclude_index=self.shift_index, cam_map=self.cam_map)
         if warnings:
@@ -307,7 +490,6 @@ class AddWorkerPage(QWidget):
         self.shifts_list = []
         self.cam_map = {}
 
-        # 🔴 استخراج مقادیر واژگان داینامیک از حافظه رجیستری
         self.settings = QSettings("SmartVision", "AttendanceSystem")
         self.t_single = self.settings.value("term_singular", "کارگر")
         self.t_plural = self.settings.value("term_plural", "کارگران")
@@ -481,11 +663,17 @@ class AddWorkerPage(QWidget):
             reply = QMessageBox.question(self, "هشدار شیفت", f"هیچ شیفتی برای این {self.t_single} تعریف نکرده‌اید. ادامه می‌دهید؟", QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.No: return
 
+        clean_shifts = []
+        for s in self.shifts_list:
+            shift_copy = s.copy()
+            shift_copy.pop("camera_name", None)
+            clean_shifts.append(shift_copy)
+
         payload = {
             "name": f"{first_name} {last_name}",
             "national_id": self.input_national_id.text().strip(),
             "phone_number": self.input_phone.text().strip(),
-            "shifts": self.shifts_list 
+            "shifts": clean_shifts
         }
 
         self.btn_submit.setEnabled(False)
