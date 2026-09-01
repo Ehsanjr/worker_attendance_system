@@ -100,8 +100,12 @@ class ProcessAndAddPhotoThread(QThread):
             worker_folder = WORKERS_DIR / folder_name
             worker_folder.mkdir(parents=True, exist_ok=True)
 
-            app = FaceAnalysis(name="buffalo_l")
-            app.prepare(ctx_id=0)
+            # 🔴 FIX (ارورِ CUBLAS "resource allocation failed"): همیشه روی CPU،
+            # تا با سشنِ GPUِ AI Threadِ داشبوردِ زنده که هم‌زمان ممکن است در
+            # حال اجرا باشد تداخل نکند (ثبتِ عکسِ کارگر کارِ نادر و غیر
+            # real-time است؛ چند ثانیه کندتر شدنش مهم نیست).
+            app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+            app.prepare(ctx_id=-1)
 
             added_data = []
             for src_path in self.photo_paths:
@@ -703,6 +707,9 @@ class ManageShiftsDialog(QDialog):
 
 class WorkersListPage(QWidget):
     switch_to_add_worker = pyqtSignal()
+    # 🔴 هر بار مشخصات/عکس/شیفت/ناحیه‌ی یک کارگر تغییر کنه یا کارگری حذف بشه، این سیگنال ساطع می‌شه
+    # تا صفحه‌ی داشبورد زنده بتونه AI Engine رو برای بارگذاری مجدد چهره‌ها/شیفت‌ها/نواحی مطلع کنه.
+    data_changed = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -795,11 +802,19 @@ class WorkersListPage(QWidget):
 
     def edit_worker(self, worker_data):
         dialog = EditWorkerBasicDialog(worker_data, self)
-        if dialog.exec_() == QDialog.Accepted: self.load_workers_data()
+        dialog.exec_()
+        # چه مشخصات متنی ذخیره شده باشه (Accepted) چه فقط عکس‌ها اضافه/حذف شده باشن
+        # (که مستقل از دکمه‌ی ذخیره/انصراف بلافاصله روی سرور اعمال می‌شن)، جدول رو
+        # رفرش و AI Engine رو از تغییر مطلع می‌کنیم.
+        self.load_workers_data()
+        self.data_changed.emit()
 
     def open_shifts_manager(self, worker_data):
         dialog = ManageShiftsDialog(worker_data["id"], worker_data["name"], self.cam_map, self)
         dialog.exec_()
+        # افزودن/ویرایش/حذف شیفت داخل این دیالوگ بلافاصله روی سرور اعمال می‌شه،
+        # پس مستقل از نتیجه‌ی دیالوگ باید AI Engine مطلع بشه.
+        self.data_changed.emit()
 
     def delete_worker(self, worker_id):
         confirm = QMessageBox.question(self, "تایید", f"آیا از حذف {self.t_single} اطمینان دارید؟", QMessageBox.Yes | QMessageBox.No)
@@ -807,4 +822,5 @@ class WorkersListPage(QWidget):
             try:
                 requests.delete(f"http://localhost:8000/employees/{worker_id}")
                 self.load_workers_data()
+                self.data_changed.emit()
             except Exception as e: QMessageBox.critical(self, "خطا", str(e))

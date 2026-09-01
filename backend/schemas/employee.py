@@ -49,7 +49,8 @@ class EmployeeResponse(EmployeeBase):
     created_at: datetime
     is_deleted: bool
     shifts: List[EmployeeShiftResponse] = [] # 🔴 اضافه شدن لیست شیفت‌ها به خروجی
-
+    face_embeddings: List[FaceEmbeddingResponse] = []
+    
     class Config:
         from_attributes = True
 

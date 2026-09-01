@@ -70,3 +70,38 @@ class YOLOv8PersonDetector(BasePersonDetector):
                 })
 
         return detections
+
+    def detect_batch(self, frames: List[np.ndarray]) -> List[List[Dict[str, Any]]]:
+        """
+        🔴 تشخیصِ دسته‌ای: به‌جای فراخوانیِ جداگانه‌ی مدل برای هر دوربین (که هر بار
+        هزینه‌ی جداگانه‌ی انتقالِ داده به GPU و اجرای یک forward pass دارد)، همه‌ی
+        فریم‌های دوربین‌های فعال در یک عبورِ واحد از مدل پردازش می‌شوند. این دقیقاً
+        همان کاری‌ست که ultralytics به‌صورتِ بومی از یک لیستِ فریم پشتیبانی می‌کند.
+
+        ورودی: لیستی از فریم‌ها (به هر تعداد دوربینِ فعال)
+        خروجی: لیستی هم‌طول و هم‌ترتیب؛ هرکدام دقیقاً مثلِ خروجیِ detect()
+        """
+        if not frames:
+            return []
+
+        results = self.model(
+            frames,
+            verbose=False,
+            conf=self.conf_threshold,
+            classes=[self.person_class_id]
+        )
+
+        all_detections: List[List[Dict[str, Any]]] = []
+        for r in results:
+            detections = []
+            if r.boxes is not None:
+                for box in r.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    confidence = float(box.conf[0])
+                    detections.append({
+                        "bbox": (x1, y1, x2, y2),
+                        "confidence": confidence
+                    })
+            all_detections.append(detections)
+
+        return all_detections

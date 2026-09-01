@@ -1,12 +1,14 @@
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from typing import List
-from schemas.employee import FaceEmbeddingResponse
 from database import get_db
 from models.employee import Employee, EmployeeShift
 from models.face_embedding import FaceEmbedding
-from schemas.employee import FaceEmbeddingCreate, EmployeeShiftCreate, EmployeeShiftResponse
 from schemas.employee import (
+    FaceEmbeddingCreate, 
+    FaceEmbeddingResponse,
+    EmployeeShiftCreate, 
+    EmployeeShiftResponse,
     EmployeeCreate,
     EmployeeUpdate,
     EmployeeResponse,
@@ -16,16 +18,34 @@ router = APIRouter(prefix="/employees", tags=["employees"])
 
 @router.post("/", response_model=EmployeeResponse)
 def create_employee(employee: EmployeeCreate, db: Session = Depends(get_db)):
-    db_employee = Employee(
-        name=employee.name,
-        national_id=employee.national_id,
-        phone_number=employee.phone_number
-    )
-    db.add(db_employee)
+    db_employee = None
+    
+    # بررسی وجود قبلی کارگر بر اساس کد ملی (حتی اگر soft-deleted شده باشد)
+    if employee.national_id:
+        db_employee = db.query(Employee).filter(Employee.national_id == employee.national_id).first()
+
+    if db_employee:
+        # اگر رکورد وجود داشت، اطلاعاتش بروز و دوباره فعال می‌شود (Upsert)
+        db_employee.name = employee.name
+        db_employee.phone_number = employee.phone_number
+        db_employee.is_deleted = False
+        
+        # غیرفعال کردن شیفت‌های قبلی کارگر برای جایگزینی شیفت‌های جدید
+        db.query(EmployeeShift).filter(EmployeeShift.employee_id == db_employee.id).update({"is_deleted": True})
+    else:
+        # ایجاد رکورد جدید در صورت عدم وجود
+        db_employee = Employee(
+            name=employee.name,
+            national_id=employee.national_id,
+            phone_number=employee.phone_number,
+            is_deleted=False
+        )
+        db.add(db_employee)
+
     db.commit()
     db.refresh(db_employee)
 
-    # ذخیره تمام شیفت‌هایی که از فرانت‌اند فرستاده شده
+    # ثبت شیفت‌های جدید فرستاده‌شده از فرانت‌اند
     for shift_data in employee.shifts:
         new_shift = EmployeeShift(
             employee_id=db_employee.id,
@@ -33,7 +53,8 @@ def create_employee(employee: EmployeeCreate, db: Session = Depends(get_db)):
             allowed_days=shift_data.allowed_days,
             shift_start=shift_data.shift_start,
             shift_end=shift_data.shift_end,
-            zone_mask=shift_data.zone_mask
+            zone_mask=shift_data.zone_mask,
+            is_deleted=False
         )
         db.add(new_shift)
     
@@ -72,7 +93,12 @@ def delete_employee(employee_id: int, db: Session = Depends(get_db)):
     if not db_employee:
         raise HTTPException(status_code=404, detail="Employee not found")
     
+    # 1. Soft-delete خود کارگر
     db_employee.is_deleted = True 
+    
+    # 2. Soft-delete آبشاری تمام شیفت‌های مربوط به این کارگر
+    db.query(EmployeeShift).filter(EmployeeShift.employee_id == employee_id).update({"is_deleted": True})
+    
     db.commit()
     return {"status": "soft_deleted", "employee_id": employee_id}
 
@@ -88,9 +114,6 @@ def add_face_embedding(employee_id: int, data: FaceEmbeddingCreate, db: Session 
     db.refresh(db_embedding)
     return {"status": "success", "embedding_id": db_embedding.id}
 
-# ==========================================
-# API های جدید مخصوص مدیریت شیفت‌های یک کارگر
-# ==========================================
 @router.post("/{employee_id}/shifts", response_model=EmployeeShiftResponse)
 def add_employee_shift(employee_id: int, shift: EmployeeShiftCreate, db: Session = Depends(get_db)):
     db_shift = EmployeeShift(
@@ -99,7 +122,8 @@ def add_employee_shift(employee_id: int, shift: EmployeeShiftCreate, db: Session
         allowed_days=shift.allowed_days,
         shift_start=shift.shift_start,
         shift_end=shift.shift_end,
-        zone_mask=shift.zone_mask
+        zone_mask=shift.zone_mask,
+        is_deleted=False
     )
     db.add(db_shift)
     db.commit()
@@ -111,7 +135,7 @@ def delete_employee_shift(shift_id: int, db: Session = Depends(get_db)):
     db_shift = db.query(EmployeeShift).filter(EmployeeShift.id == shift_id).first()
     if not db_shift:
         raise HTTPException(status_code=404, detail="Shift not found")
-    db_shift.is_deleted = True # حذف نرم شیفت
+    db_shift.is_deleted = True
     db.commit()
     return {"status": "soft_deleted", "shift_id": shift_id}
 
@@ -131,13 +155,11 @@ def update_employee_shift(shift_id: int, data: EmployeeShiftCreate, db: Session 
     db.refresh(db_shift)
     return db_shift
 
-# دریافت تمام چهره‌ها (Embeddings) یک کارگر
 @router.get("/{employee_id}/embeddings", response_model=List[FaceEmbeddingResponse])
 def get_employee_embeddings(employee_id: int, db: Session = Depends(get_db)):
     embeddings = db.query(FaceEmbedding).filter(FaceEmbedding.employee_id == employee_id).all()
     return embeddings
 
-# حذف یک چهره خاص از دیتابیس
 @router.delete("/embeddings/{embedding_id}")
 def delete_face_embedding(embedding_id: int, db: Session = Depends(get_db)):
     db_emb = db.query(FaceEmbedding).filter(FaceEmbedding.id == embedding_id).first()

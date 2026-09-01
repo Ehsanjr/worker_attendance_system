@@ -459,8 +459,15 @@ class AddWorkerThread(QThread):
             worker_folder.mkdir(parents=True, exist_ok=True)
 
             self.progress_signal.emit("در حال پردازش چهره‌ها در هوش مصنوعی...")
-            app = FaceAnalysis(name="buffalo_l")
-            app.prepare(ctx_id=0)
+            # 🔴 FIX (ارورِ CUBLAS "resource allocation failed"): این پردازش در یک
+            # QThreadِ جدا اجرا می‌شود و اگر هم‌زمان با AI Threadِ داشبوردِ زنده
+            # (که مدام روی GPU چهره تشخیص می‌دهد) یک session مستقلِ دیگر روی
+            # همان GPU باز کند، دو Contextِ CUDA هم‌زمان با هم تداخل می‌کنند.
+            # ثبتِ چهره‌ی یک کارگر کارِ نادر و غیر real-time است، پس همیشه روی
+            # CPU اجرا می‌شود تا هرگز با GPUِ داشبورد رقابت نکند (چند ثانیه
+            # کندتر، ولی صد در صد بدون تداخل).
+            app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+            app.prepare(ctx_id=-1)
 
             successful_embeddings = 0
             for idx, src_path in enumerate(self.photo_paths):
@@ -471,18 +478,43 @@ class AddWorkerThread(QThread):
                 img = cv2.imread(str(dest_path))
                 if img is None: continue
 
-                faces = app.get(img)
-                if len(faces) == 0: continue
+                # ۱. استخراج ایمبدینگ از تصویر اصلی (کيفيت بالا)
+                faces_orig = app.get(img)
+                if len(faces_orig) > 0:
+                    emb_payload = {"embedding": faces_orig[0].embedding.tolist(), "image_path": str(dest_path)}
+                    emb_res = requests.post(f"http://localhost:8000/employees/{worker_id}/embeddings", json=emb_payload)
+                    if emb_res.status_code == 200: 
+                        successful_embeddings += 1
 
-                emb_payload = {"embedding": faces[0].embedding.tolist(), "image_path": str(dest_path)}
-                emb_res = requests.post(f"http://localhost:8000/employees/{worker_id}/embeddings", json=emb_payload)
-                if emb_res.status_code == 200: successful_embeddings += 1
+                # ۲. اعمال Data Degradation برای شبیه‌سازی فریم‌های تار دوربین مداربسته
+                h, w = img.shape[:2]
+                # کاهش شدید ابعاد به ۳۲ پیکسل برای از بین بردن جزییات دقیق
+                small_img = cv2.resize(img, (32, 32), interpolation=cv2.INTER_AREA)
+                # اعمال بلور گاوسی جهت شبیه‌سازی نویز و تاری حرکت/دوربین
+                blurred_small = cv2.GaussianBlur(small_img, (5, 5), 0)
+                # بازگرداندن به ابعاد اولیه جهت ورودی مدل InsightFace
+                degraded_img = cv2.resize(blurred_small, (w, h), interpolation=cv2.INTER_LINEAR)
 
-            self.finished_signal.emit(True, f"{self.t_single} با موفقیت ثبت شد!\n{len(self.payload['shifts'])} شیفت و {successful_embeddings} چهره ذخیره گردید.")
+                # ذخیره فیزیکی تصویر تخریب شده برای ارجاع و دیباگ
+                degraded_dest_path = worker_folder / f"face{idx + 1}_degraded{suffix}"
+                cv2.imwrite(str(degraded_dest_path), degraded_img)
+
+                # ۳. استخراج ایمبدینگ از تصویر تخریب‌شده (مخصوص دوربین مداربسته)
+                faces_deg = app.get(degraded_img)
+                if len(faces_deg) > 0:
+                    emb_payload_deg = {"embedding": faces_deg[0].embedding.tolist(), "image_path": str(degraded_dest_path)}
+                    requests.post(f"http://localhost:8000/employees/{worker_id}/embeddings", json=emb_payload_deg)
+
+            self.finished_signal.emit(True, f"{self.t_single} با موفقیت ثبت شد!\n{len(self.payload['shifts'])} شیفت و {successful_embeddings} چهره اصلی (به همراه نسخه مداربسته) ذخیره گردید.")
         except Exception as e:
             self.finished_signal.emit(False, f"خطای غیرمنتظره:\n{str(e)}")
 
+            
 class AddWorkerPage(QWidget):
+    # 🔴 وقتی کارگر جدید و امبدینگ‌هاش با موفقیت ثبت شدن، این سیگنال ساطع می‌شه
+    # تا داشبورد زنده بتونه AI Engine رو برای بارگذاری مجدد چهره‌ها مطلع کنه.
+    worker_added = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.setLayoutDirection(Qt.RightToLeft)
@@ -688,5 +720,6 @@ class AddWorkerPage(QWidget):
         if success:
             QMessageBox.information(self, "موفق", message)
             self.clear_all()
+            self.worker_added.emit()
         else:
             QMessageBox.critical(self, "خطا", message)

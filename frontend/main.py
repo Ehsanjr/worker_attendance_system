@@ -1,6 +1,14 @@
 import sys
 import os
 from pathlib import Path
+import torch
+
+# جلوگیری از Fragmentation و رزرو کامل VRAM توسط PyTorch
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+# در صورت استفاده از YOLO با PyTorch، حافظه اضافی را آزاد کنید
+torch.cuda.empty_cache()
+
 
 # ۱. محاسبه دقیق مسیرهای پروژه
 BASE_DIR = Path(__file__).resolve().parent.parent

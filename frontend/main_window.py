@@ -125,6 +125,12 @@ class MainWindow(QMainWindow):
             lambda: self.page_container.setCurrentWidget(self.page_add_worker)
         )
 
+        # 🔴 وقتی مشخصات/عکس/شیفت/ناحیه‌ی کارگری تغییر کنه یا حذف بشه، یا کارگر جدیدی
+        # ثبت بشه، AI Engine داشبورد زنده باید چهره‌ها/شیفت‌ها/نواحی رو دوباره از
+        # دیتابیس بخونه؛ بدون این دو خط، تغییرات تا ری‌استارت کامل برنامه اعمال نمی‌شدند.
+        self.page_workers_list.data_changed.connect(self.page_live.request_reload_faces)
+        self.page_add_worker.worker_added.connect(self.page_live.request_reload_faces)
+
         # افزودن سایدبار و کانتینر صفحات به لایوت اصلی نرم‌افزار
         main_layout.addWidget(sidebar)
         main_layout.addWidget(self.page_container, stretch=1)
