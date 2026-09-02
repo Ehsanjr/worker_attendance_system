@@ -3,11 +3,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from insightface.app import FaceAnalysis
-
-from backend.database import SessionLocal
-from backend.models.employee import Employee
-from backend.models.face_embedding import FaceEmbedding
+import torch
+from PIL import Image
+from facenet_pytorch import MTCNN, InceptionResnetV1
+from database import SessionLocal
+from models.employee import Employee
+from models.face_embedding import FaceEmbedding
 
 
 # مسیر پوشه workers
@@ -16,26 +17,23 @@ WORKERS_DIR = BASE_DIR / "data" / "workers"
 
 
 # مدل تشخیص چهره
-app = FaceAnalysis(name="buffalo_l")
-app.prepare(ctx_id=0)
-
+_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+mtcnn = MTCNN(keep_all=False, device=_device)
+resnet = InceptionResnetV1(pretrained="vggface2").eval().to(_device)
 
 def extract_embedding(image_path):
-
-    img = cv2.imread(str(image_path))
-
+    with open(image_path, "rb") as f:
+        file_bytes = np.frombuffer(f.read(), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)    
     if img is None:
         return None
-
-    faces = app.get(img)
-
-    if len(faces) == 0:
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(rgb)
+    face_tensor = mtcnn(pil_img)
+    if face_tensor is None:
         return None
-
-    face = faces[0]
-
-    embedding = face.embedding
-
+    with torch.no_grad():
+        embedding = resnet(face_tensor.unsqueeze(0).to(_device)).cpu().numpy()[0]
     return embedding
 
 
