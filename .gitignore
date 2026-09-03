@@ -32,3 +32,5 @@ project_tree.txt
 data/
 
 *.rar
+
+*.db

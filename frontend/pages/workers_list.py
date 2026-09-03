@@ -5,8 +5,9 @@ import json
 import requests
 from pathlib import Path
 import cv2
-from insightface.app import FaceAnalysis
-
+import torch
+from facenet_pytorch import MTCNN, InceptionResnetV1
+from PIL import Image
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
                              QTableWidgetItem, QPushButton, QHeaderView, 
                              QMessageBox, QDialog, QLineEdit, QFormLayout, 
@@ -104,8 +105,9 @@ class ProcessAndAddPhotoThread(QThread):
             # تا با سشنِ GPUِ AI Threadِ داشبوردِ زنده که هم‌زمان ممکن است در
             # حال اجرا باشد تداخل نکند (ثبتِ عکسِ کارگر کارِ نادر و غیر
             # real-time است؛ چند ثانیه کندتر شدنش مهم نیست).
-            app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-            app.prepare(ctx_id=-1)
+            _device = torch.device("cpu")
+            mtcnn = MTCNN(keep_all=False, device=_device)
+            resnet = InceptionResnetV1(pretrained="vggface2").eval().to(_device)
 
             added_data = []
             for src_path in self.photo_paths:
@@ -115,12 +117,14 @@ class ProcessAndAddPhotoThread(QThread):
 
                 img = cv2.imread(str(dest_path))
                 if img is None: continue
-                faces = app.get(img)
-                if len(faces) == 0:
-                    os.remove(dest_path) 
+                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                face_tensor = mtcnn(Image.fromarray(rgb))
+                if face_tensor is None:
+                    os.remove(dest_path)
                     continue
-
-                emb_payload = {"embedding": faces[0].embedding.tolist(), "image_path": str(dest_path)}
+                with torch.no_grad():
+                    emb = resnet(face_tensor.unsqueeze(0).to(_device)).cpu().numpy()[0]
+                emb_payload = {"embedding": emb.tolist(), "image_path": str(dest_path)}
                 emb_res = requests.post(f"http://localhost:8000/employees/{self.worker_id}/embeddings", json=emb_payload)
                 if emb_res.status_code == 200:
                     new_id = emb_res.json().get("embedding_id")

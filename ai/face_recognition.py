@@ -2,7 +2,9 @@ import threading
 import cv2
 import numpy as np
 from numpy.linalg import norm
-from insightface.app import FaceAnalysis
+import torch
+from PIL import Image
+from facenet_pytorch import MTCNN, InceptionResnetV1
 from datetime import datetime
 
 
@@ -37,71 +39,61 @@ class ArcFaceRecognizer:
         self.load_workers()
 
     def _init_face_app(self, device):
-        """
-        🔴 راه‌اندازیِ FaceAnalysis با fallback امن: اگر GPU/CUDA به هر دلیلی
-        (کمبود VRAM، ناسازگاریِ نسخه‌ی onnxruntime-gpu با درایور/CUDA نصب‌شده،
-        دراگ استفاده‌ی هم‌زمانِ YOLO+insightface از GPU و...) بالا نیاید، به‌جای
-        کرش کاملِ برنامه، روی CPU سوییچ می‌کنیم و برنامه به کار خودش ادامه
-        می‌دهد (کندتر ولی زنده).
-        """
-        want_cuda = device == "cuda"
-        providers = ["CUDAExecutionProvider"] if want_cuda else ["CPUExecutionProvider"]
+        want_cuda = device == "cuda" and torch.cuda.is_available()
+        torch_device = torch.device("cuda" if want_cuda else "cpu")
 
-        try:
-            self.app = FaceAnalysis(name="buffalo_l", providers=providers)
-            self.app.prepare(ctx_id=0 if want_cuda else -1, det_size=(640, 640))
-            self.device = "cuda" if want_cuda else "cpu"
-        except Exception as e:
-            if want_cuda:
-                print(f"[WARNING] راه‌اندازیِ CUDA برای چهره‌یابی شکست خورد ({e})؛ "
-                      f"سوییچ به CPU. برای رفع اصلِ مشکل، نسخه‌ی onnxruntime-gpu "
-                      f"و درایور/CUDA/cuDNN نصب‌شده روی سیستم را چک کنید (باید هم‌خوان باشند) "
-                      f"و مطمئن شوید VRAM کافی برای YOLO+insightface هم‌زمان وجود دارد.")
-                self.app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-                self.app.prepare(ctx_id=-1, det_size=(640, 640))
-                self.device = "cpu"
-            else:
-                raise
+        # keep_all=True: همه‌ی چهره‌های داخلِ فریم برگردونده بشن، نه فقط بزرگ‌ترین
+        self.mtcnn = MTCNN(keep_all=True, device=torch_device)
+        self.resnet = InceptionResnetV1(pretrained="vggface2").eval().to(torch_device)
+
+        self.torch_device = torch_device
+        self.device = "cuda" if want_cuda else "cpu"
 
     def get_face_and_embedding(self, image):
         if image is None or image.size == 0:
             return None, None
 
         try:
-            with self._infer_lock:  # 🔴 سریالی‌کردنِ فراخوانیِ GPU
-                faces = self.app.get(image)
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb)
 
-            if len(faces) == 0:
-                return None, None
+            with self._infer_lock:
+                boxes, probs = self.mtcnn.detect(pil_img)
+                if boxes is None:
+                    return None, None
+                aligned = self.mtcnn.extract(pil_img, boxes, save_path=None)
+                if aligned is None:
+                    return None, None
+                embeddings = self.resnet(aligned.to(self.torch_device)).detach().cpu().numpy()
 
+            # همون منطقِ انتخابِ «چهره‌ای که به مرکز نزدیک‌تره» که قبلاً داشتیم
             h_img, w_img = image.shape[:2]
             crop_center_x = w_img / 2.0
 
-            def face_score(f):
-                fx1, fy1, fx2, fy2 = f.bbox
-                area = max(0.0, fx2 - fx1) * max(0.0, fy2 - fy1)
-                face_center_x = (fx1 + fx2) / 2.0
-                horizontal_offset = abs(face_center_x - crop_center_x) / (w_img / 2.0 + 1e-6)
-                horizontal_offset = min(horizontal_offset, 1.0)
-                return area * (1.0 - 0.85 * horizontal_offset)
+            def face_score(i):
+                bx1, by1, bx2, by2 = boxes[i]
+                area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+                face_center_x = (bx1 + bx2) / 2.0
+                offset = min(abs(face_center_x - crop_center_x) / (w_img / 2.0 + 1e-6), 1.0)
+                return area * (1.0 - 0.85 * offset)
 
-            best_face = max(faces, key=face_score)
+            best_i = max(range(len(boxes)), key=face_score)
 
-            embedding = best_face.embedding
-            if embedding is None:
-                return best_face, None
-
-            embedding = embedding.astype(np.float32)
+            embedding = embeddings[best_i].astype(np.float32)
             n = norm(embedding)
             if n == 0:
-                return best_face, None
+                return None, None
             embedding /= n
 
-            return best_face, embedding
+            class _Face:  # برای سازگاری با bbox.astype در recognize()
+                bbox = np.array(boxes[best_i])
+
+            return _Face(), embedding
         except Exception as e:
             print("[ERROR] embedding error:", e)
             return None, None
 
+        
     def load_workers(self):
         print("Loading face embeddings and shift rules from API...")
         try:
@@ -259,44 +251,41 @@ class ArcFaceRecognizer:
         }
 
     def detect_and_recognize(self, frame, camera_id):
-        """
-        چهره‌یابی مستقیم روی کل فریم (نه کراپ از باکس بدن هر نفر).
-        خروجی: لیستی از دیکشنری، هرکدام برای یک چهره‌ی واقعاً دیده‌شده در فریم.
-
-        🔴 این تابع ممکن است از چند Thread مختلف هم‌زمان صدا زده شود
-        (ThreadPoolExecutor در live_dashboard.py). فراخوانیِ واقعیِ مدل با
-        self._infer_lock سریالی می‌شود تا با CUDA/onnxruntime تداخل نکند.
-        """
         results = []
         if frame is None or frame.size == 0:
             return results
 
         try:
-            with self._infer_lock:  # 🔴 سریالی‌کردنِ فراخوانیِ GPU
-                faces = self.app.get(frame)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb)
+
+            with self._infer_lock:
+                boxes, probs = self.mtcnn.detect(pil_img)
+                if boxes is None:
+                    return results
+                aligned = self.mtcnn.extract(pil_img, boxes, save_path=None)
+                if aligned is None:
+                    return results
+                embeddings = self.resnet(aligned.to(self.torch_device)).detach().cpu().numpy()
         except Exception as e:
             print("[ERROR] face detection error:", e)
             return results
 
-        for face in faces:
-            embedding = face.embedding
-            if embedding is None:
-                continue
-
-            embedding = embedding.astype(np.float32)
+        for i, box in enumerate(boxes):
+            embedding = embeddings[i].astype(np.float32)
             n = norm(embedding)
             if n == 0:
                 continue
             embedding = embedding / n
 
             emp_id, name, confidence, shift_ok = self.compare_embedding(embedding, camera_id)
-            fx1, fy1, fx2, fy2 = face.bbox.astype(int)
+            fx1, fy1, fx2, fy2 = map(int, box)
 
             results.append({
                 "name": name if emp_id is not None else "unknown",
                 "employee_id": emp_id,
                 "confidence": confidence,
-                "face_bbox": [int(fx1), int(fy1), int(fx2), int(fy2)],
+                "face_bbox": [fx1, fy1, fx2, fy2],
                 "shift_ok": shift_ok
             })
 

@@ -4,8 +4,9 @@ import json
 import requests
 from pathlib import Path
 import cv2
-from insightface.app import FaceAnalysis
-
+import torch
+from facenet_pytorch import MTCNN, InceptionResnetV1
+from PIL import Image
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, 
                              QLineEdit, QPushButton, QLabel, QFileDialog, QMessageBox,
                              QComboBox, QCheckBox, QGridLayout, QGroupBox,
@@ -466,8 +467,9 @@ class AddWorkerThread(QThread):
             # ثبتِ چهره‌ی یک کارگر کارِ نادر و غیر real-time است، پس همیشه روی
             # CPU اجرا می‌شود تا هرگز با GPUِ داشبورد رقابت نکند (چند ثانیه
             # کندتر، ولی صد در صد بدون تداخل).
-            app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-            app.prepare(ctx_id=-1)
+            _device = torch.device("cpu")
+            mtcnn = MTCNN(keep_all=False, device=_device)
+            resnet = InceptionResnetV1(pretrained="vggface2").eval().to(_device)
 
             successful_embeddings = 0
             for idx, src_path in enumerate(self.photo_paths):
@@ -479,9 +481,12 @@ class AddWorkerThread(QThread):
                 if img is None: continue
 
                 # ۱. استخراج ایمبدینگ از تصویر اصلی (کيفيت بالا)
-                faces_orig = app.get(img)
-                if len(faces_orig) > 0:
-                    emb_payload = {"embedding": faces_orig[0].embedding.tolist(), "image_path": str(dest_path)}
+                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                face_tensor = mtcnn(Image.fromarray(rgb))
+                if face_tensor is not None:
+                    with torch.no_grad():
+                        emb = resnet(face_tensor.unsqueeze(0).to(_device)).cpu().numpy()[0]
+                    emb_payload = {"embedding": emb.tolist(), "image_path": str(dest_path)}
                     emb_res = requests.post(f"http://localhost:8000/employees/{worker_id}/embeddings", json=emb_payload)
                     if emb_res.status_code == 200: 
                         successful_embeddings += 1
@@ -500,9 +505,12 @@ class AddWorkerThread(QThread):
                 cv2.imwrite(str(degraded_dest_path), degraded_img)
 
                 # ۳. استخراج ایمبدینگ از تصویر تخریب‌شده (مخصوص دوربین مداربسته)
-                faces_deg = app.get(degraded_img)
-                if len(faces_deg) > 0:
-                    emb_payload_deg = {"embedding": faces_deg[0].embedding.tolist(), "image_path": str(degraded_dest_path)}
+                rgb_deg = cv2.cvtColor(degraded_img, cv2.COLOR_BGR2RGB)
+                face_tensor_deg = mtcnn(Image.fromarray(rgb_deg))
+                if face_tensor_deg is not None:
+                    with torch.no_grad():
+                        emb_deg = resnet(face_tensor_deg.unsqueeze(0).to(_device)).cpu().numpy()[0]
+                    emb_payload_deg = {"embedding": emb_deg.tolist(), "image_path": str(degraded_dest_path)}
                     requests.post(f"http://localhost:8000/employees/{worker_id}/embeddings", json=emb_payload_deg)
 
             self.finished_signal.emit(True, f"{self.t_single} با موفقیت ثبت شد!\n{len(self.payload['shifts'])} شیفت و {successful_embeddings} چهره اصلی (به همراه نسخه مداربسته) ذخیره گردید.")
